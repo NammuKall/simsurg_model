@@ -37,7 +37,7 @@ This repository provides a robust framework for the analysis of surgical skills 
 
 ```bash
 # Clone the repository
-git clone https://github.com/NammuKall/sim_surg_skill.git
+git clone https://github.com/NammuKall/simsurg_model.git
 cd sim_surg_skill
 
 # Create a virtual environment (optional but recommended)
