@@ -14,14 +14,14 @@ The SimSurgSkill dataset contains videos of simulated surgical procedures with g
 REPOSITORY STRUCTURE
 -------------------
 sim_surg_skill/
-├── main.py                # Main script to run the pipeline
-├── README.md              # This file
-└── src/                   # Source code directory
-    ├── __init__.py        # Makes the directory a Python package
-    ├── data_loader.py     # Functions for loading and preprocessing data
-    ├── visualization.py   # Functions for data visualization
-    ├── models.py          # Neural network model definitions
-    └── utils.py           # Utility functions
+- main.py                # Main script to run the pipeline
+- README.md              # This file
+- src/                   # Source code directory
+  - __init__.py          # Makes the directory a Python package
+  - data_loader.py       # Functions for loading and preprocessing data
+  - visualization.py     # Functions for data visualization
+  - models.py            # Neural network model definitions
+  - utils.py             # Utility functions
 
 INSTALLATION
 -----------
@@ -37,24 +37,24 @@ DATASET STRUCTURE
 The code expects the SimSurgSkill dataset to be organized as follows:
 
 simsurgskill_2021_dataset/
-├── train_v1/
-│   ├── videos/
-│   │   ├── fps1/
-│   │   └── fps30/
-│   └── annotations/
-│       ├── skill_metric_gt.csv
-│       └── bounding_box_gt/
-├── train_v2/
-│   ├── videos/
-│   │   ├── fps1/
-│   │   └── fps30/
-│   └── annotations/
-│       └── bounding_box_gt/
-└── test/
-    ├── videos/
-    │   ├── fps1/
-    │   └── fps30/
-    └── annotations/
+- train_v1/
+  - videos/
+    - fps1/
+    - fps30/
+  - annotations/
+    - skill_metric_gt.csv
+    - bounding_box_gt/
+- train_v2/
+  - videos/
+    - fps1/
+    - fps30/
+  - annotations/
+    - bounding_box_gt/
+- test/
+  - videos/
+    - fps1/
+    - fps30/
+  - annotations/
 
 USAGE
 -----
