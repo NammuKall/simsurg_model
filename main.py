@@ -21,9 +21,9 @@ def main():
     data_dir = os.path.join(base_dir, "data/simsurgskill_2021_dataset")
     
     # Process videos to images if needed
-    process_v1 = False
-    process_v2 = False
-    process_test = False
+    process_v1 = True
+    process_v2 = True
+    process_test = True
     
     if process_v1:
         v1_dir = os.path.join(data_dir, "train_v1/videos/fps1/")
