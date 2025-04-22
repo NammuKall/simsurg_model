@@ -1,257 +1,85 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-COCO format data loader for SimSurgSkill dataset
+Script to convert SimSurgSkill dataset to COCO format
 """
 import os
-import cv2
 import json
-import numpy as np
 import shutil
-import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+import numpy as np
+import cv2
+from pathlib import Path
+from sklearn.model_selection import train_test_split
 
-class COCODataset(Dataset):
-    """PyTorch Dataset for COCO format data"""
-    def __init__(self, root_dir, annotation_file, transform=None):
-        """
-        Args:
-            root_dir (string): Directory with all the images
-            annotation_file (string): Path to COCO annotation file
-            transform (callable, optional): Transform to apply to samples
-        """
-        self.root_dir = root_dir
-        self.transform = transform
-        
-        # Load COCO annotations
-        with open(annotation_file, 'r') as f:
-            self.coco_data = json.load(f)
-            
-        # Create image id to annotations mapping
-        self.image_ids = []
-        self.annotations_by_image = {}
-        
-        for img in self.coco_data['images']:
-            image_id = img['id']
-            self.image_ids.append(image_id)
-            self.annotations_by_image[image_id] = []
-        
-        for ann in self.coco_data['annotations']:
-            image_id = ann['image_id']
-            if image_id in self.annotations_by_image:
-                self.annotations_by_image[image_id].append(ann)
-                
-        # Create category id to name mapping
-        self.categories = {}
-        for cat in self.coco_data['categories']:
-            self.categories[cat['id']] = cat['name']
-    
-    def __len__(self):
-        return len(self.image_ids)
-    
-    def __getitem__(self, idx):
-        image_id = self.image_ids[idx]
-        
-        # Find image info
-        image_info = None
-        for img in self.coco_data['images']:
-            if img['id'] == image_id:
-                image_info = img
-                break
-                
-        # Load image
-        img_name = image_info['file_name']
-        img_path = os.path.join(self.root_dir, img_name)
-        image = cv2.imread(img_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
-        
-        # Get annotations for this image
-        annotations = self.annotations_by_image[image_id]
-        
-        # Extract bounding boxes, labels, etc.
-        boxes = []
-        labels = []
-        
-        for ann in annotations:
-            # COCO format is [x, y, width, height]
-            x, y, w, h = ann['bbox']
-            # Convert to [x_min, y_min, x_max, y_max] format
-            boxes.append([x, y, x + w, y + h])
-            labels.append(ann['category_id'])
-            
-        boxes = np.array(boxes, dtype=np.float32) if boxes else np.zeros((0, 4), dtype=np.float32)
-        labels = np.array(labels, dtype=np.int64) if labels else np.zeros(0, dtype=np.int64)
-        
-        # Create sample dict
-        sample = {
-            'image': image,
-            'boxes': boxes,
-            'labels': labels,
-            'image_id': image_id
-        }
-        
-        if self.transform:
-            sample = self.transform(sample)
-            
-        return sample
-
-def convert_to_coco_format(data_dir, output_dir, train_val_split=0.8):
+def create_coco_directory_structure(base_dir):
     """
-    Convert existing dataset to COCO format
+    Create COCO format directory structure
     
     Args:
-        data_dir (str): Directory containing SimSurgSkill dataset
-        output_dir (str): Output directory for COCO format data
-        train_val_split (float): Ratio of training to validation data
-    
-    Returns:
-        dict: Dictionary with paths to COCO directories and files
+        base_dir (str): Base directory where the COCO structure will be created
     """
-    # Create COCO directory structure
-    os.makedirs(os.path.join(output_dir, 'train', 'images'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'val', 'images'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'test', 'images'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'annotations'), exist_ok=True)
+    coco_dir = os.path.join(base_dir, "coco_format")
     
-    # Define categories
-    categories = [
-        {"id": 1, "name": "instrument", "supercategory": "instrument"},
-        {"id": 2, "name": "needle", "supercategory": "needle"},
-        {"id": 3, "name": "thread", "supercategory": "thread"}
-    ]
+    # Create main directories
+    os.makedirs(coco_dir, exist_ok=True)
+    os.makedirs(os.path.join(coco_dir, "train", "images"), exist_ok=True)
+    os.makedirs(os.path.join(coco_dir, "val", "images"), exist_ok=True)
+    os.makedirs(os.path.join(coco_dir, "test", "images"), exist_ok=True)
+    os.makedirs(os.path.join(coco_dir, "annotations"), exist_ok=True)
     
-    # Process data directories
-    print("Processing dataset directories...")
-    v1_images, v1_annotations = process_dataset_dir(
-        os.path.join(data_dir, "train_v1/videos/fps1/"),
-        os.path.join(data_dir, "train_v1/annotations/bounding_box_gt/")
-    )
+    print(f"Created COCO directory structure at {coco_dir}")
+    return coco_dir
+
+def convert_bbox_to_coco(annotation, image_id, annotation_id, category_id=1):
+    """
+    Convert bounding box annotation to COCO format
     
-    v2_images, v2_annotations = process_dataset_dir(
-        os.path.join(data_dir, "train_v2/videos/fps1/"),
-        os.path.join(data_dir, "train_v2/annotations/bounding_box_gt/")
-    )
+    Args:
+        annotation (dict): Original annotation
+        image_id (int): Image ID
+        annotation_id (int): Annotation ID
+        category_id (int): Category ID
+        
+    Returns:
+        dict: COCO format annotation
+    """
+    # Extract bounding box coordinates
+    x_min = annotation.get("x_min", 0)
+    y_min = annotation.get("y_min", 0)
+    x_max = annotation.get("x_max", 0)
+    y_max = annotation.get("y_max", 0)
     
-    test_images, test_annotations = process_dataset_dir(
-        os.path.join(data_dir, "test/videos/fps1/"),
-        os.path.join(data_dir, "test/annotations/bounding_box_gt/")
-    )
+    # COCO format uses [x,y,width,height]
+    width = x_max - x_min
+    height = y_max - y_min
     
-    print(f"Found {len(v1_images)} images in train_v1, {len(v2_images)} in train_v2, {len(test_images)} in test")
-    
-    # Combine train_v1 and train_v2 for training data
-    all_train_images = v1_images + v2_images
-    all_train_annotations = {**v1_annotations, **v2_annotations}
-    
-    # Split training data into train and validation sets
-    np.random.seed(42)
-    indices = np.arange(len(all_train_images))
-    np.random.shuffle(indices)
-    split_idx = int(len(all_train_images) * train_val_split)
-    
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
-    
-    train_images = [all_train_images[i] for i in train_indices]
-    val_images = [all_train_images[i] for i in val_indices]
-    
-    print(f"Split data into {len(train_images)} training and {len(val_images)} validation images")
-    
-    # Create COCO datasets
-    print("Creating COCO format datasets...")
-    create_coco_dataset(
-        train_images, 
-        all_train_annotations, 
-        categories, 
-        os.path.join(output_dir, 'train', 'images'),
-        os.path.join(output_dir, 'annotations', 'instances_train.json')
-    )
-    
-    create_coco_dataset(
-        val_images, 
-        all_train_annotations, 
-        categories, 
-        os.path.join(output_dir, 'val', 'images'),
-        os.path.join(output_dir, 'annotations', 'instances_val.json')
-    )
-    
-    create_coco_dataset(
-        test_images, 
-        test_annotations, 
-        categories, 
-        os.path.join(output_dir, 'test', 'images'),
-        os.path.join(output_dir, 'annotations', 'instances_test.json')
-    )
-    
-    # Return paths dictionary
-    return {
-        'train_dir': os.path.join(output_dir, 'train', 'images'),
-        'val_dir': os.path.join(output_dir, 'val', 'images'),
-        'test_dir': os.path.join(output_dir, 'test', 'images'),
-        'train_ann': os.path.join(output_dir, 'annotations', 'instances_train.json'),
-        'val_ann': os.path.join(output_dir, 'annotations', 'instances_val.json'),
-        'test_ann': os.path.join(output_dir, 'annotations', 'instances_test.json')
+    # Create COCO annotation
+    coco_annotation = {
+        "id": annotation_id,
+        "image_id": image_id,
+        "category_id": category_id,
+        "bbox": [float(x_min), float(y_min), float(width), float(height)],
+        "area": float(width * height),
+        "iscrowd": 0
     }
+    
+    return coco_annotation
 
-def process_dataset_dir(image_dir, annotation_dir):
+def create_coco_annotations(annotations_dir, image_dir, output_file, categories):
     """
-    Process a dataset directory to extract images and annotations
+    Create COCO format annotations JSON file
     
     Args:
+        annotations_dir (str): Directory containing original annotations
         image_dir (str): Directory containing images
-        annotation_dir (str): Directory containing annotations
-    
-    Returns:
-        tuple: (list of image paths, dictionary of annotations)
-    """
-    images = []
-    annotations = {}
-    
-    # Check if directories exist
-    if not os.path.exists(image_dir):
-        print(f"Warning: Image directory {image_dir} does not exist")
-        return images, annotations
-        
-    if not os.path.exists(annotation_dir):
-        print(f"Warning: Annotation directory {annotation_dir} does not exist")
-        return images, annotations
-    
-    # Get all image files
-    for file_name in os.listdir(image_dir):
-        if file_name.endswith('.jpeg'):
-            img_path = os.path.join(image_dir, file_name)
-            images.append(img_path)
-            
-            # Find corresponding annotation file
-            base_name = os.path.splitext(file_name)[0]
-            ann_file = os.path.join(annotation_dir, f"{base_name}.json")
-            
-            if os.path.exists(ann_file):
-                try:
-                    with open(ann_file, 'r') as f:
-                        annotations[img_path] = json.load(f)
-                except json.JSONDecodeError:
-                    print(f"Warning: Could not parse annotation file {ann_file}")
-    
-    return images, annotations
-
-def create_coco_dataset(image_paths, annotations, categories, output_img_dir, output_ann_file):
-    """
-    Create a COCO format dataset from images and annotations
-    
-    Args:
-        image_paths (list): List of image paths
-        annotations (dict): Dictionary of annotations by image path
+        output_file (str): Path to output JSON file
         categories (list): List of category dictionaries
-        output_img_dir (str): Output directory for images
-        output_ann_file (str): Output file for annotations
-    
+        
     Returns:
-        dict: COCO format dataset
+        dict: COCO format annotations
     """
     # Initialize COCO format structure
-    coco_data = {
+    coco_json = {
         "images": [],
         "annotations": [],
         "categories": categories
@@ -260,184 +88,306 @@ def create_coco_dataset(image_paths, annotations, categories, output_img_dir, ou
     image_id = 0
     annotation_id = 0
     
-    # Process each image
-    for img_path in image_paths:
-        img_name = os.path.basename(img_path)
+    # Get all annotation files
+    annotation_files = [f for f in os.listdir(annotations_dir) if f.endswith('.json')]
+    
+    for ann_file in annotation_files:
+        ann_path = os.path.join(annotations_dir, ann_file)
         
-        try:
-            # Copy image to output directory
-            shutil.copy(img_path, os.path.join(output_img_dir, img_name))
-            
-            # Read image to get dimensions
-            img = cv2.imread(img_path)
-            if img is None:
-                print(f"Warning: Could not read image {img_path}, skipping")
-                continue
+        # Load annotation file
+        with open(ann_path, 'r') as f:
+            original_annotations = json.load(f)
+        
+        # Get corresponding image filename (assuming same base name)
+        image_base_name = os.path.splitext(ann_file)[0]
+        image_file = f"{image_base_name}.jpeg"
+        image_path = os.path.join(image_dir, image_file)
+        
+        # Check if image exists
+        if not os.path.exists(image_path):
+            print(f"Warning: Image {image_path} not found, skipping annotation {ann_file}")
+            continue
+        
+        # Get image dimensions
+        img = cv2.imread(image_path)
+        height, width = img.shape[:2]
+        
+        # Add image info to COCO format
+        coco_json["images"].append({
+            "id": image_id,
+            "file_name": image_file,
+            "width": width,
+            "height": height
+        })
+        
+        # Convert each annotation to COCO format
+        for obj_id, ann in original_annotations.items():
+            if "x_min" in ann and "y_min" in ann and "x_max" in ann and "y_max" in ann:
+                # Determine category_id based on annotation class if available
+                category_id = 1  # Default to 1 if class info not available
+                if "class" in ann:
+                    class_name = ann["class"]
+                    # Find corresponding category_id
+                    for cat in categories:
+                        if cat["name"] == class_name:
+                            category_id = cat["id"]
+                            break
                 
-            height, width = img.shape[:2]
-            
-            # Add image info to COCO format
-            coco_data["images"].append({
-                "id": image_id,
-                "file_name": img_name,
-                "width": width,
-                "height": height
-            })
-            
-            # Process annotations for this image
-            if img_path in annotations:
-                for obj_id, ann in annotations[img_path].items():
-                    if "x_min" in ann and "y_min" in ann and "x_max" in ann and "y_max" in ann:
-                        # Extract bounding box coordinates
-                        x_min = float(ann["x_min"])
-                        y_min = float(ann["y_min"])
-                        x_max = float(ann["x_max"])
-                        y_max = float(ann["y_max"])
-                        
-                        # COCO format uses [x, y, width, height]
-                        width = x_max - x_min
-                        height = y_max - y_min
-                        
-                        # Determine category_id
-                        category_id = 1  # Default
-                        if "class" in ann:
-                            class_name = ann["class"]
-                            for cat in categories:
-                                if cat["name"] == class_name:
-                                    category_id = cat["id"]
-                                    break
-                        
-                        # Create COCO annotation
-                        coco_annotation = {
-                            "id": annotation_id,
-                            "image_id": image_id,
-                            "category_id": category_id,
-                            "bbox": [x_min, y_min, width, height],
-                            "area": width * height,
-                            "iscrowd": 0
-                        }
-                        
-                        coco_data["annotations"].append(coco_annotation)
-                        annotation_id += 1
-            
-            image_id += 1
-        except Exception as e:
-            print(f"Error processing {img_path}: {e}")
-    
-    # Write annotations to file
-    with open(output_ann_file, 'w') as f:
-        json.dump(coco_data, f, indent=2)
-    
-    print(f"Created COCO dataset with {len(coco_data['images'])} images and {len(coco_data['annotations'])} annotations")
-    return coco_data
-
-class Compose:
-    """Composes several transforms together"""
-    def __init__(self, transforms):
-        self.transforms = transforms
+                coco_ann = convert_bbox_to_coco(ann, image_id, annotation_id, category_id)
+                coco_json["annotations"].append(coco_ann)
+                annotation_id += 1
         
-    def __call__(self, sample):
-        for t in self.transforms:
-            sample = t(sample)
-        return sample
-
-class ToTensor:
-    """Convert ndarrays in sample to Tensors"""
-    def __call__(self, sample):
-        image, boxes, labels = sample['image'], sample['boxes'], sample['labels']
-        
-        # Convert image to tensor
-        image = image.transpose((2, 0, 1))  # Convert to (C, H, W)
-        sample['image'] = torch.from_numpy(image).float() / 255.0  # Normalize
-        
-        # Convert boxes and labels to tensor
-        sample['boxes'] = torch.from_numpy(boxes)
-        sample['labels'] = torch.from_numpy(labels)
-        sample['image_id'] = torch.tensor([sample['image_id']])
-            
-        return sample
-
-def collate_fn(batch):
-    """
-    Collate function for DataLoader to handle samples with varying number of boxes
-    """
-    images = []
-    targets = []
+        image_id += 1
     
-    for sample in batch:
-        images.append(sample['image'])
-        target = {
-            'boxes': sample['boxes'],
-            'labels': sample['labels'],
-            'image_id': sample['image_id']
-        }
-        targets.append(target)
+    # Write to JSON file
+    with open(output_file, 'w') as f:
+        json.dump(coco_json, f, indent=2)
     
-    images = torch.stack(images, 0)
-    
-    return images, targets
+    print(f"Created COCO annotations at {output_file}")
+    return coco_json
 
-def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4):
+def split_and_organize_data(base_dir, data_dir, coco_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
     """
-    Get PyTorch DataLoaders for COCO dataset
+    Split data into train/val/test sets and organize into COCO format
     
     Args:
-        coco_paths (dict): Dictionary with paths to COCO directories and files
-        batch_size (int): Batch size for DataLoader
-        num_workers (int): Number of workers for DataLoader
-    
-    Returns:
-        tuple: (train_loader, val_loader, test_loader)
+        base_dir (str): Base directory
+        data_dir (str): Directory containing SimSurgSkill dataset
+        coco_dir (str): COCO format output directory
+        train_ratio (float): Ratio of training data
+        val_ratio (float): Ratio of validation data
+        test_ratio (float): Ratio of test data
     """
-    # Define transforms
-    transform = Compose([
-        ToTensor()
-    ])
+    # Define categories for COCO format
+    # Update these based on your actual classes
+    categories = [
+        {"id": 1, "name": "instrument", "supercategory": "instrument"},
+        {"id": 2, "name": "needle", "supercategory": "needle"},
+        {"id": 3, "name": "thread", "supercategory": "thread"}
+    ]
     
-    # Create datasets
-    train_dataset = COCODataset(
-        coco_paths['train_dir'],
-        coco_paths['train_ann'],
-        transform=transform
-    )
+    # Gather all image files from train_v1, train_v2 and test directories
+    all_images = []
     
-    val_dataset = COCODataset(
-        coco_paths['val_dir'],
-        coco_paths['val_ann'],
-        transform=transform
-    )
+    v1_image_dir = os.path.join(data_dir, "train_v1/videos/fps1/")
+    v1_label_dir = os.path.join(data_dir, "train_v1/annotations/bounding_box_gt/")
+    for f in os.listdir(v1_image_dir):
+        if f.endswith('.jpeg'):
+            all_images.append({
+                "image_path": os.path.join(v1_image_dir, f),
+                "annotation_dir": v1_label_dir,
+                "set": "train_v1"
+            })
     
-    test_dataset = COCODataset(
-        coco_paths['test_dir'],
-        coco_paths['test_ann'],
-        transform=transform
-    )
+    v2_image_dir = os.path.join(data_dir, "train_v2/videos/fps1/")
+    v2_label_dir = os.path.join(data_dir, "train_v2/annotations/bounding_box_gt/")
+    for f in os.listdir(v2_image_dir):
+        if f.endswith('.jpeg'):
+            all_images.append({
+                "image_path": os.path.join(v2_image_dir, f),
+                "annotation_dir": v2_label_dir,
+                "set": "train_v2"
+            })
     
-    print(f"Created datasets with {len(train_dataset)} training, {len(val_dataset)} validation, and {len(test_dataset)} test samples")
+    test_image_dir = os.path.join(data_dir, "test/videos/fps1/")
+    test_label_dir = os.path.join(data_dir, "test/annotations/bounding_box_gt/")
+    for f in os.listdir(test_image_dir):
+        if f.endswith('.jpeg'):
+            all_images.append({
+                "image_path": os.path.join(test_image_dir, f),
+                "annotation_dir": test_label_dir,
+                "set": "test"
+            })
     
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=collate_fn
-    )
+    # Split data
+    if test_ratio > 0:
+        # Use existing test set if it exists
+        train_val = [img for img in all_images if img["set"] != "test"]
+        test_set = [img for img in all_images if img["set"] == "test"]
+        
+        # If test set is empty or too small, use a random split
+        if len(test_set) < len(all_images) * test_ratio * 0.5:
+            train_val, test_set = train_test_split(all_images, test_size=test_ratio, random_state=42)
+    else:
+        train_val = all_images
+        test_set = []
     
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn
-    )
+    # Split train_val into train and val
+    if val_ratio > 0:
+        val_ratio_adjusted = val_ratio / (train_ratio + val_ratio)
+        train_set, val_set = train_test_split(train_val, test_size=val_ratio_adjusted, random_state=42)
+    else:
+        train_set = train_val
+        val_set = []
     
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn
-    )
+    # Copy images and organize by set
+    train_dir = os.path.join(coco_dir, "train", "images")
+    val_dir = os.path.join(coco_dir, "val", "images")
+    test_dir = os.path.join(coco_dir, "test", "images")
     
-    return train_loader, val_loader, test_loader
+    # Keep track of images in each set for annotation creation
+    train_images = []
+    val_images = []
+    test_images = []
+    
+    # Process training set
+    for img in train_set:
+        img_path = img["image_path"]
+        img_name = os.path.basename(img_path)
+        dst_path = os.path.join(train_dir, img_name)
+        shutil.copy(img_path, dst_path)
+        train_images.append({
+            "path": dst_path,
+            "name": img_name,
+            "annotation_dir": img["annotation_dir"]
+        })
+    
+    # Process validation set
+    for img in val_set:
+        img_path = img["image_path"]
+        img_name = os.path.basename(img_path)
+        dst_path = os.path.join(val_dir, img_name)
+        shutil.copy(img_path, dst_path)
+        val_images.append({
+            "path": dst_path,
+            "name": img_name,
+            "annotation_dir": img["annotation_dir"]
+        })
+    
+    # Process test set
+    for img in test_set:
+        img_path = img["image_path"]
+        img_name = os.path.basename(img_path)
+        dst_path = os.path.join(test_dir, img_name)
+        shutil.copy(img_path, dst_path)
+        test_images.append({
+            "path": dst_path,
+            "name": img_name,
+            "annotation_dir": img["annotation_dir"]
+        })
+    
+    print(f"Organized {len(train_images)} training images, {len(val_images)} validation images, and {len(test_images)} test images")
+    
+    # Create COCO annotations for each set
+    annotations_dir = os.path.join(coco_dir, "annotations")
+    
+    # Gather all annotation files for each set
+    train_annotations = {}
+    for img in train_images:
+        ann_name = os.path.splitext(img["name"])[0] + ".json"
+        ann_path = os.path.join(img["annotation_dir"], ann_name)
+        if os.path.exists(ann_path):
+            with open(ann_path, 'r') as f:
+                train_annotations[img["name"]] = json.load(f)
+    
+    val_annotations = {}
+    for img in val_images:
+        ann_name = os.path.splitext(img["name"])[0] + ".json"
+        ann_path = os.path.join(img["annotation_dir"], ann_name)
+        if os.path.exists(ann_path):
+            with open(ann_path, 'r') as f:
+                val_annotations[img["name"]] = json.load(f)
+    
+    test_annotations = {}
+    for img in test_images:
+        ann_name = os.path.splitext(img["name"])[0] + ".json"
+        ann_path = os.path.join(img["annotation_dir"], ann_name)
+        if os.path.exists(ann_path):
+            with open(ann_path, 'r') as f:
+                test_annotations[img["name"]] = json.load(f)
+    
+    # Create COCO format annotations
+    create_coco_annotations_by_set(train_dir, train_annotations, os.path.join(annotations_dir, "instances_train.json"), categories)
+    create_coco_annotations_by_set(val_dir, val_annotations, os.path.join(annotations_dir, "instances_val.json"), categories)
+    create_coco_annotations_by_set(test_dir, test_annotations, os.path.join(annotations_dir, "instances_test.json"), categories)
+
+def create_coco_annotations_by_set(image_dir, annotations_dict, output_file, categories):
+    """
+    Create COCO format annotations JSON file from a dictionary of annotations
+    
+    Args:
+        image_dir (str): Directory containing images
+        annotations_dict (dict): Dictionary of annotations by image name
+        output_file (str): Path to output JSON file
+        categories (list): List of category dictionaries
+        
+    Returns:
+        dict: COCO format annotations
+    """
+    # Initialize COCO format structure
+    coco_json = {
+        "images": [],
+        "annotations": [],
+        "categories": categories
+    }
+    
+    image_id = 0
+    annotation_id = 0
+    
+    # Process each image with annotations
+    for image_file, annotations in annotations_dict.items():
+        image_path = os.path.join(image_dir, image_file)
+        
+        # Check if image exists
+        if not os.path.exists(image_path):
+            print(f"Warning: Image {image_path} not found, skipping annotation")
+            continue
+        
+        # Get image dimensions
+        img = cv2.imread(image_path)
+        if img is None:
+            print(f"Warning: Could not read image {image_path}, skipping")
+            continue
+            
+        height, width = img.shape[:2]
+        
+        # Add image info to COCO format
+        coco_json["images"].append({
+            "id": image_id,
+            "file_name": image_file,
+            "width": width,
+            "height": height
+        })
+        
+        # Convert each annotation to COCO format
+        for obj_id, ann in annotations.items():
+            if "x_min" in ann and "y_min" in ann and "x_max" in ann and "y_max" in ann:
+                # Determine category_id based on annotation class if available
+                category_id = 1  # Default to 1 if class info not available
+                if "class" in ann:
+                    class_name = ann["class"]
+                    # Find corresponding category_id
+                    for cat in categories:
+                        if cat["name"] == class_name:
+                            category_id = cat["id"]
+                            break
+                
+                coco_ann = convert_bbox_to_coco(ann, image_id, annotation_id, category_id)
+                coco_json["annotations"].append(coco_ann)
+                annotation_id += 1
+        
+        image_id += 1
+    
+    # Write to JSON file
+    with open(output_file, 'w') as f:
+        json.dump(coco_json, f, indent=2)
+    
+    print(f"Created COCO annotations at {output_file} with {len(coco_json['images'])} images and {len(coco_json['annotations'])} annotations")
+    return coco_json
+
+def convert_to_coco_format(base_dir, data_dir):
+    """
+    Main function to convert SimSurgSkill dataset to COCO format
+    
+    Args:
+        base_dir (str): Base directory
+        data_dir (str): Directory containing SimSurgSkill dataset
+    """
+    # Create COCO directory structure
+    coco_dir = create_coco_directory_structure(base_dir)
+    
+    # Split and organize data
+    split_and_organize_data(base_dir, data_dir, coco_dir)
+    
+    print(f"Conversion to COCO format completed. Output directory: {coco_dir}")
+    return coco_dir
