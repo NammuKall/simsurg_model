@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Main script for SimSurgSkill dataset processing and model training
-with COCO format data
+with COCO format data and comprehensive evaluation
 """
 import os
 import numpy as np
@@ -13,12 +13,17 @@ from src.data_loader import process_videos_to_images
 from src.visualization import visualize_metrics
 from src.models import EfficientDetModel
 from src.coco_data_loader import convert_to_coco_format, get_coco_data_loaders
+from src.evaluation_metrics import run_evaluation  # Import the evaluation functions
 
 def main():
     # Define paths - update these with your actual paths
     base_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(base_dir, "data/simsurgskill_2021_dataset")
     coco_dir = os.path.join(base_dir, "data/coco_format")
+    results_dir = os.path.join(base_dir, "results")
+    
+    # Create results directory
+    os.makedirs(results_dir, exist_ok=True)
     
     # Process videos to images if needed
     process_v1 = True
@@ -76,6 +81,9 @@ def main():
     
     # Training loop
     num_epochs = 10
+    train_losses = []
+    val_losses = []
+    
     for epoch in range(num_epochs):
         # Training
         model.train()
@@ -103,6 +111,7 @@ def main():
                 print(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}')
         
         avg_train_loss = train_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
         print(f'Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_train_loss:.4f}')
         
         # Validation
@@ -124,6 +133,7 @@ def main():
                 val_loss += loss.item()
         
         avg_val_loss = val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
         print(f'Epoch [{epoch+1}/{num_epochs}], Validation Loss: {avg_val_loss:.4f}')
     
     # Save the model
@@ -132,5 +142,64 @@ def main():
     torch.save(model.state_dict(), model_save_path)
     print(f'Model saved to {model_save_path}')
     
+    # EVALUATION PHASE
+    print("\n" + "="*60)
+    print("STARTING EVALUATION PHASE")
+    print("="*60)
+    
+    # Load the best model (in practice, you might want to save checkpoints during training)
+    model.load_state_dict(torch.load(model_save_path))
+    
+    # Run comprehensive evaluation
+    evaluation_results = run_evaluation(
+        model=model,
+        test_loader=test_loader,
+        device=device,
+        save_dir=results_dir
+    )
+    
+    # Additional analysis: Plot training curves
+    import matplotlib.pyplot as plt
+    
+    plt.figure(figsize=(12, 5))
+    
+    # Training and validation loss
+    plt.subplot(1, 2, 1)
+    plt.plot(range(1, num_epochs + 1), train_losses, 'b-o', label='Training Loss', linewidth=2)
+    plt.plot(range(1, num_epochs + 1), val_losses, 'r-o', label='Validation Loss', linewidth=2)
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Final metrics summary
+    plt.subplot(1, 2, 2)
+    metrics_names = ['Precision', 'Recall', 'mIoU']
+    best_precision = max(evaluation_results['precision'])
+    best_recall = max(evaluation_results['recall'])
+    best_miou = max(evaluation_results['miou'])
+    metrics_values = [best_precision, best_recall, best_miou]
+    
+    bars = plt.bar(metrics_names, metrics_values, color=['blue', 'red', 'green'], alpha=0.7)
+    plt.ylabel('Score')
+    plt.title('Best Evaluation Metrics')
+    plt.ylim([0, 1])
+    
+    # Add value labels on bars
+    for bar, value in zip(bars, metrics_values):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                f'{value:.3f}', ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()
+    training_plots_path = os.path.join(results_dir, 'training_summary.png')
+    plt.savefig(training_plots_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    print(f"\nAll results saved to: {results_dir}")
+    print("Evaluation complete!")
+    
+    return evaluation_results
+
 if __name__ == "__main__":
-    main()
+    results = main()
