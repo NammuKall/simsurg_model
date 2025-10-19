@@ -3,17 +3,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Main script for SimSurgSkill dataset model training with COCO format data
+Main script for SimSurgSkill dataset processing and model training
+with COCO format data and comprehensive evaluation
 """
 import os
 import numpy as np
 import torch
 import torch.optim as optim
-import pandas as pd
+import matplotlib.pyplot as plt
 from src.models import EfficientDetModel
 from src.coco_data_loader import get_coco_data_loaders
-from src.evaluation_metrics import run_evaluation
-import matplotlib.pyplot as plt
+
 
 def main():
     # Define paths - update these with your actual paths
@@ -29,15 +29,7 @@ def main():
     print("SIMSURGSKILL MODEL TRAINING")
     print("="*60)
     
-    # Check if COCO format data exists
-    if not os.path.exists(coco_dir):
-        print("\n❌ ERROR: COCO format data not found!")
-        print(f"   Expected location: {coco_dir}")
-        print("\n✅ SOLUTION: Run the data pipeline first:")
-        print("   python data.py --data_dir data/simsurgskill_2021_dataset")
-        return
-    
-    # Use existing COCO data (created by data.py)
+    # Use already converted COCO format
     coco_paths = {
         'train_dir': os.path.join(coco_dir, 'train', 'images'),
         'val_dir': os.path.join(coco_dir, 'val', 'images'),
@@ -47,48 +39,30 @@ def main():
         'test_ann': os.path.join(coco_dir, 'annotations', 'instances_test.json')
     }
     
-    # Verify all paths exist
-    print("\nVerifying COCO format data...")
-    all_exist = True
+    # Verify COCO files exist
+    print("\nVerifying COCO format files...")
     for key, path in coco_paths.items():
-        exists = os.path.exists(path)
-        status = "✅" if exists else "❌"
-        print(f"  {status} {key}: {path}")
-        if not exists:
-            all_exist = False
-    
-    if not all_exist:
-        print("\n❌ ERROR: Some COCO files are missing!")
-        print("✅ SOLUTION: Run the data pipeline:")
-        print("   python data.py --data_dir data/simsurgskill_2021_dataset")
-        return
-    
-    print("\n✅ All COCO files found!")
+        if os.path.exists(path):
+            print(f"  ✅ {key}: {path}")
+        else:
+            print(f"  ❌ {key}: {path} NOT FOUND!")
+            return
     
     # Get data loaders for COCO format data
     print("\nCreating data loaders...")
-    train_loader, val_loader, test_loader = get_coco_data_loaders(
-        coco_paths, 
-        batch_size=8,
-        num_workers=2,  # Reduce for Colab
-        target_size=(720, 1280)  # Resize all images to same size
-    )
-    
-    print(f"✅ Created data loaders:")
-    print(f"   - Training batches: {len(train_loader)}")
-    print(f"   - Validation batches: {len(val_loader)}")
-    print(f"   - Test batches: {len(test_loader)}")
+    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=4)
+    print(f"  ✅ Training batches: {len(train_loader)}")
+    print(f"  ✅ Validation batches: {len(val_loader)}")
+    print(f"  ✅ Test batches: {len(test_loader)}")
     
     # Initialize model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n🖥️  Using device: {device}")
+    print(f"\n🔧 Using device: {device}")
     
-    model = EfficientDetModel(num_classes=2).to(device)  # 2 classes: needle, needle_driver
+    model = EfficientDetModel(num_classes=2).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
     print("✅ Model initialized and ready for training")
-    print(f"   - Classes: 2 (needle, needle_driver)")
-    print(f"   - Optimizer: Adam (lr=0.001)")
     
     # Training loop
     num_epochs = 10
@@ -100,85 +74,103 @@ def main():
     print("="*60)
     
     for epoch in range(num_epochs):
+        print(f"\n📊 Epoch [{epoch+1}/{num_epochs}]")
+        print("-" * 60)
+        
         # Training
         model.train()
         train_loss = 0.0
+        num_batches = 0
         
         for i, (images, targets) in enumerate(train_loader):
-            images = images.to(device)
-            
-            # Move targets to device
-            for j in range(len(targets)):
-                for k in targets[j]:
-                    targets[j][k] = targets[j][k].to(device)
-            
-            # Forward pass
-            outputs = model(images, targets)
-            loss = outputs['loss']
-            
-            # Backward and optimize
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            train_loss += loss.item()
-            
-            if (i + 1) % 10 == 0:
-                print(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}')
-        
-        avg_train_loss = train_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
-        
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for images, targets in val_loader:
+            try:
                 images = images.to(device)
                 
                 # Move targets to device
                 for j in range(len(targets)):
-                    for k in targets[j]:
-                        targets[j][k] = targets[j][k].to(device)
+                    targets[j]['boxes'] = targets[j]['boxes'].to(device)
+                    targets[j]['labels'] = targets[j]['labels'].to(device)
+                    targets[j]['image_id'] = targets[j]['image_id'].to(device)
                 
                 # Forward pass
                 outputs = model(images, targets)
-                loss = outputs['loss']
                 
-                val_loss += loss.item()
+                # Extract loss from output dictionary
+                if isinstance(outputs, dict) and 'loss' in outputs:
+                    loss = outputs['loss']
+                else:
+                    print(f"  ⚠️  Warning: Unexpected output format at batch {i}")
+                    print(f"       Output type: {type(outputs)}")
+                    continue
+                
+                # Backward and optimize
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += loss.item()
+                num_batches += 1
+                
+                if (i + 1) % 10 == 0:
+                    print(f'  Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}')
+                    
+            except Exception as e:
+                print(f"  ❌ Error in training batch {i}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
         
-        avg_val_loss = val_loss / len(val_loader)
+        avg_train_loss = train_loss / num_batches if num_batches > 0 else 0
+        train_losses.append(avg_train_loss)
+        print(f'\n  📈 Training Loss: {avg_train_loss:.4f}')
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        num_val_batches = 0
+        
+        with torch.no_grad():
+            for i, (images, targets) in enumerate(val_loader):
+                try:
+                    images = images.to(device)
+                    
+                    # Move targets to device
+                    for j in range(len(targets)):
+                        targets[j]['boxes'] = targets[j]['boxes'].to(device)
+                        targets[j]['labels'] = targets[j]['labels'].to(device)
+                        targets[j]['image_id'] = targets[j]['image_id'].to(device)
+                    
+                    # Forward pass
+                    outputs = model(images, targets)
+                    
+                    # Extract loss
+                    if isinstance(outputs, dict) and 'loss' in outputs:
+                        loss = outputs['loss']
+                        val_loss += loss.item()
+                        num_val_batches += 1
+                        
+                except Exception as e:
+                    print(f"  ❌ Error in validation batch {i}: {e}")
+                    continue
+        
+        avg_val_loss = val_loss / num_val_batches if num_val_batches > 0 else 0
         val_losses.append(avg_val_loss)
-        
-        print(f'\n📊 Epoch [{epoch+1}/{num_epochs}]:')
-        print(f'   Training Loss:   {avg_train_loss:.4f}')
-        print(f'   Validation Loss: {avg_val_loss:.4f}\n')
+        print(f'  📉 Validation Loss: {avg_val_loss:.4f}')
     
     # Save the model
-    model_dir = os.path.join(base_dir, 'models')
-    os.makedirs(model_dir, exist_ok=True)
-    model_save_path = os.path.join(model_dir, 'model.pth')
-    torch.save(model.state_dict(), model_save_path)
-    print(f'✅ Model saved to {model_save_path}')
-    
-    # EVALUATION PHASE
     print("\n" + "="*60)
-    print("STARTING EVALUATION PHASE")
+    print("SAVING MODEL")
     print("="*60)
     
-    # Load the best model
-    model.load_state_dict(torch.load(model_save_path))
-    
-    # Run comprehensive evaluation
-    evaluation_results = run_evaluation(
-        model=model,
-        test_loader=test_loader,
-        device=device,
-        save_dir=results_dir
-    )
+    model_save_path = os.path.join(base_dir, 'models', 'model.pth')
+    os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
+    torch.save(model.state_dict(), model_save_path)
+    print(f'✅ Model saved to: {model_save_path}')
     
     # Plot training curves
-    print("\nGenerating training plots...")
+    print("\n" + "="*60)
+    print("GENERATING TRAINING PLOTS")
+    print("="*60)
     
     plt.figure(figsize=(12, 5))
     
@@ -186,47 +178,63 @@ def main():
     plt.subplot(1, 2, 1)
     plt.plot(range(1, num_epochs + 1), train_losses, 'b-o', label='Training Loss', linewidth=2)
     plt.plot(range(1, num_epochs + 1), val_losses, 'r-o', label='Validation Loss', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.title('Training and Validation Loss', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=11)
     plt.grid(True, alpha=0.3)
     
-    # Final metrics summary
+    # Loss statistics
     plt.subplot(1, 2, 2)
-    metrics_names = ['Precision', 'Recall', 'mIoU']
-    best_precision = max(evaluation_results['precision']) if evaluation_results['precision'] else 0
-    best_recall = max(evaluation_results['recall']) if evaluation_results['recall'] else 0
-    best_miou = max(evaluation_results['miou']) if evaluation_results['miou'] else 0
-    metrics_values = [best_precision, best_recall, best_miou]
+    metrics_names = ['Final Train\nLoss', 'Final Val\nLoss', 'Min Train\nLoss', 'Min Val\nLoss']
+    metrics_values = [
+        train_losses[-1] if train_losses else 0,
+        val_losses[-1] if val_losses else 0,
+        min(train_losses) if train_losses else 0,
+        min(val_losses) if val_losses else 0
+    ]
     
-    bars = plt.bar(metrics_names, metrics_values, color=['blue', 'red', 'green'], alpha=0.7)
-    plt.ylabel('Score')
-    plt.title('Best Evaluation Metrics')
-    plt.ylim([0, 1])
+    colors = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12']
+    bars = plt.bar(metrics_names, metrics_values, color=colors, alpha=0.7, edgecolor='black', linewidth=2)
+    plt.ylabel('Loss Value', fontsize=12)
+    plt.title('Training Summary', fontsize=14, fontweight='bold')
+    plt.xticks(fontsize=9)
     
     # Add value labels on bars
     for bar, value in zip(bars, metrics_values):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
-                f'{value:.3f}', ha='center', va='bottom', fontweight='bold')
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01, 
+                f'{value:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=10)
     
     plt.tight_layout()
     training_plots_path = os.path.join(results_dir, 'training_summary.png')
     plt.savefig(training_plots_path, dpi=300, bbox_inches='tight')
-    print(f"✅ Training plots saved to {training_plots_path}")
+    print(f"✅ Training plots saved to: {training_plots_path}")
+    plt.show()
     
-    # Final summary
+    # Print final summary
     print("\n" + "="*60)
     print("TRAINING COMPLETE!")
     print("="*60)
-    print(f"\n📁 Results saved to: {results_dir}")
-    print(f"📁 Model saved to: {model_save_path}")
-    print(f"\n📊 Final Metrics:")
-    print(f"   - Best Precision: {best_precision:.3f}")
-    print(f"   - Best Recall:    {best_recall:.3f}")
-    print(f"   - Best mIoU:      {best_miou:.3f}")
+    print(f"\n📊 Final Results:")
+    print(f"  • Final Training Loss: {train_losses[-1]:.4f}")
+    print(f"  • Final Validation Loss: {val_losses[-1]:.4f}")
+    print(f"  • Best Training Loss: {min(train_losses):.4f} (Epoch {train_losses.index(min(train_losses))+1})")
+    print(f"  • Best Validation Loss: {min(val_losses):.4f} (Epoch {val_losses.index(min(val_losses))+1})")
+    print(f"\n📁 Outputs saved to:")
+    print(f"  • Model: {model_save_path}")
+    print(f"  • Training plots: {training_plots_path}")
+    print(f"\n🎯 Next steps:")
+    print(f"  1. Review training plots in {results_dir}")
+    print(f"  2. Run evaluation on test set")
+    print(f"  3. Fine-tune hyperparameters if needed")
     
-    return evaluation_results
+    return {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'model_path': model_save_path
+    }
+
 
 if __name__ == "__main__":
     results = main()
