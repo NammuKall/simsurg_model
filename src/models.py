@@ -127,7 +127,7 @@ class EfficientDetModel(nn.Module):
     """
     EfficientDet model for object detection
     """
-    def __init__(self, num_classes=3):
+    def __init__(self, num_classes=2):
         super(EfficientDetModel, self).__init__()
         
         # Feature extraction backbone (ResNet50)
