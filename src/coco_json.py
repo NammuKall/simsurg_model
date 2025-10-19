@@ -4,6 +4,7 @@
 # -*- coding: utf-8 -*-
 """
 COCO JSON Generator - Create COCO format annotations from wrangled data
+FIXED: Properly splits data 70/15/15 regardless of original split sizes
 """
 
 import os
@@ -72,6 +73,7 @@ class COCOJSONGenerator:
     def split_data(self, wrangled_data, train_ratio=0.7, val_ratio=0.15, random_state=42):
         """
         Split wrangled data into train/val/test sets
+        FIXED: Combines all data and does fresh 70/15/15 split
         
         Args:
             wrangled_data (dict): Wrangled data from DataWrangler
@@ -82,32 +84,41 @@ class COCOJSONGenerator:
         Returns:
             dict: Split data for train, val, test
         """
-        # Combine train_v1 and train_v2
+        # Combine ALL data from all original splits
         all_train_data = wrangled_data.get('train_v1', []) + wrangled_data.get('train_v2', [])
         test_data = wrangled_data.get('test', [])
         
-        logger.info(f"\nSplitting data:")
-        logger.info(f"  Combined train data: {len(all_train_data)} images")
-        logger.info(f"  Test data: {len(test_data)} images")
-        
-        # If test set is too small or empty, use random split from all data
+        # Combine everything for a fresh split
         total_data = all_train_data + test_data
         
-        if len(test_data) < len(total_data) * 0.1:
-            logger.warning("Test set too small, performing random split from all data")
-            train_val_data, test_data = train_test_split(
-                total_data, 
-                test_size=0.15, 
-                random_state=random_state
-            )
-        else:
-            train_val_data = all_train_data
+        logger.info(f"\nSplitting data:")
+        logger.info(f"  train_v1: {len(wrangled_data.get('train_v1', []))} images")
+        logger.info(f"  train_v2: {len(wrangled_data.get('train_v2', []))} images")
+        logger.info(f"  test: {len(wrangled_data.get('test', []))} images")
+        logger.info(f"  Total available: {len(total_data)} images")
         
-        # Split train_val into train and val
-        val_size = val_ratio / (train_ratio + val_ratio)
+        if len(total_data) == 0:
+            logger.error("No data available for splitting!")
+            return {'train': [], 'val': [], 'test': []}
+        
+        # Calculate test size
+        test_ratio = 1.0 - train_ratio - val_ratio
+        
+        logger.info(f"\nPerforming fresh random split:")
+        logger.info(f"  Target: Train={train_ratio*100:.0f}%, Val={val_ratio*100:.0f}%, Test={test_ratio*100:.0f}%")
+        
+        # First split: separate out test set
+        train_val_data, test_data = train_test_split(
+            total_data, 
+            test_size=test_ratio,
+            random_state=random_state
+        )
+        
+        # Second split: separate train and val from remaining data
+        val_size_adjusted = val_ratio / (train_ratio + val_ratio)
         train_data, val_data = train_test_split(
             train_val_data,
-            test_size=val_size,
+            test_size=val_size_adjusted,
             random_state=random_state
         )
         
@@ -199,6 +210,9 @@ class COCOJSONGenerator:
         
         logger.info(f"  Created {len(coco_data['images'])} images")
         logger.info(f"  Created {len(coco_data['annotations'])} annotations")
+        if len(coco_data['images']) > 0:
+            avg_ann = len(coco_data['annotations']) / len(coco_data['images'])
+            logger.info(f"  Average {avg_ann:.1f} annotations per image")
         
         return coco_data
     
@@ -283,7 +297,11 @@ class COCOJSONGenerator:
             logger.info(f"\n{split_name.upper()}:")
             logger.info(f"  Images: {n_images}")
             logger.info(f"  Annotations: {n_annotations}")
-            logger.info(f"  Avg annotations/image: {n_annotations/n_images:.2f}" if n_images > 0 else "  No images")
+            if n_images > 0:
+                avg_ann = n_annotations / n_images
+                logger.info(f"  Avg annotations/image: {avg_ann:.1f}")
+                if avg_ann < 2 or avg_ann > 5:
+                    logger.warning(f"  ⚠️  Expected ~3 annotations/image, got {avg_ann:.1f}")
             
             # Class distribution
             class_counts = {}
@@ -297,6 +315,8 @@ class COCOJSONGenerator:
         logger.info(f"\nTOTAL:")
         logger.info(f"  Images: {total_images}")
         logger.info(f"  Annotations: {total_annotations}")
+        if total_images > 0:
+            logger.info(f"  Overall avg: {total_annotations/total_images:.1f} annotations/image")
 
 
 def main():
