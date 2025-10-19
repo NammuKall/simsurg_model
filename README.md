@@ -1,175 +1,215 @@
-# SimSurgSkill Analysis Framework
+# SimSurg Model - Enhanced Training with Weights & Biases
 
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-red)
-![License](https://img.shields.io/badge/license-MIT-green)
+This project provides an enhanced object detection model training pipeline for the SimSurgSkill dataset with comprehensive logging, monitoring, and Weights & Biases integration.
 
-A comprehensive framework for processing, analyzing, and training deep learning models on the SimSurgSkill 2021 dataset, which contains surgical skill simulation data for surgical instrument tracking and skill assessment.
+## 🚀 Features
 
-![Surgical Simulation](https://img.shields.io/badge/Surgical%20Simulation-Computer%20Vision-blue)
+- **Enhanced Logging**: Beautiful console output with Rich library and comprehensive file logging
+- **Weights & Biases Integration**: Real-time experiment tracking and visualization
+- **Robust Error Handling**: Detailed error tracking and recovery mechanisms
+- **Progress Monitoring**: Real-time progress bars and training metrics
+- **Model Checkpointing**: Automatic model saving with metadata
+- **Visualization**: Comprehensive training plots and metrics
 
-## 📋 Table of Contents
-- [Overview](#overview)
-- [Features](#features)
-- [Installation](#installation)
-- [Project Structure](#project-structure)
-- [Dataset](#dataset)
-- [Usage](#usage)
-- [Models](#models)
-- [Results](#results)
-- [Contributing](#contributing)
-- [License](#license)
-- [Citations](#citations)
+## 📋 Prerequisites
 
-## 🔍 Overview
+- Python 3.8+
+- CUDA-capable GPU (recommended)
+- Weights & Biases account (optional but recommended)
 
-This repository provides a robust framework for the analysis of surgical skills through computer vision. It processes video data from simulated surgical procedures, extracts frames, detects instruments, and assesses surgical skill metrics. The implementation includes state-of-the-art deep learning models for object detection and skill prediction.
+## 🛠️ Installation
 
-## ✨ Features
+1. **Clone the repository**:
+   ```bash
+   git clone <your-repo-url>
+   cd simsurg_model
+   ```
 
-- **Video Processing**: Convert surgical procedure videos to frame sequences
-- **Data Visualization**: Tools for visualizing skill metrics and instrument tracking
-- **Object Detection**: Implement ResNet and EfficientDet models for instrument tracking
-- **Skill Assessment**: Analyze metrics such as needle drops and out-of-view events
-- **Modular Design**: Easy to extend with new models and analysis methods
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-## 📦 Installation
+3. **Set up environment variables**:
+   ```bash
+   # Copy the example environment file
+   cp env.example .env
+   
+   # Edit .env with your actual values
+   nano .env
+   ```
+
+## 🔧 Configuration
+
+### Environment Variables (.env file)
 
 ```bash
-# Clone the repository
-git clone https://github.com/NammuKall/simsurg_model.git
-cd sim_surg_skill
+# Weights & Biases Configuration
+WANDB_API_KEY=your_wandb_api_key_here
+WANDB_PROJECT=simsurg-model
+WANDB_ENTITY=your_wandb_username
 
-# Create a virtual environment (optional but recommended)
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Training Configuration
+BATCH_SIZE=4
+LEARNING_RATE=0.001
+NUM_EPOCHS=10
+DEVICE=auto
 
-# Install dependencies
-pip install -r requirements.txt
+# Data Paths
+DATA_DIR=data/simsurgskill_2021_dataset
+COCO_DIR=data/coco_format
+RESULTS_DIR=results
+MODEL_SAVE_DIR=models
 ```
+
+### Getting Your W&B API Key
+
+1. Go to [wandb.ai](https://wandb.ai)
+2. Sign up or log in
+3. Go to your profile settings
+4. Copy your API key
+5. Add it to your `.env` file
 
 ## 📁 Project Structure
 
 ```
-sim_surg_skill/
-├── main.py               # Entry point for running the pipeline
-├── requirements.txt      # Required dependencies
-├── README.md             # Project documentation
-└── src/                  # Source code modules
-    ├── __init__.py       # Package initialization
-    ├── data_loader.py    # Data loading and preprocessing
-    ├── visualization.py  # Data visualization tools
-    ├── models.py         # Neural network implementations
-    └── utils.py          # Utility functions
+simsurg_model/
+├── main.py                 # Enhanced training script
+├── requirements.txt        # Dependencies
+├── env.example            # Environment variables template
+├── README.md              # This file
+├── src/
+│   ├── models.py          # Model definitions
+│   ├── coco_data_loader.py # Data loading utilities
+│   └── ...                # Other source files
+├── logs/                  # Training logs (auto-created)
+├── models/                # Saved models (auto-created)
+└── results/               # Training plots and results (auto-created)
 ```
 
-## 💾 Dataset
-
-The SimSurgSkill 2021 dataset contains videos of simulated surgical procedures with annotated skill metrics and bounding boxes for instruments. The dataset is organized as follows:
-
-```
-simsurgskill_2021_dataset/
-├── train_v1/             # Training set (version 1)
-│   ├── videos/           # Video recordings
-│   └── annotations/      # Ground truth annotations
-├── train_v2/             # Training set (version 2)
-│   ├── videos/
-│   └── annotations/
-└── test/                 # Test set
-    ├── videos/
-    └── annotations/
-```
-
-Key metrics in the dataset include:
-- Needle drop counts
-- Instrument out-of-view counts
-- Bounding box coordinates for instruments
-
-## 🚀 Usage
+## 🏃‍♂️ Running Training
 
 ### Basic Usage
 
-```python
-# Run the complete pipeline
+```bash
 python main.py
-
-# Specify data paths (optional)
-python main.py --data_dir /path/to/dataset --output_dir /path/to/results
 ```
 
-### Advanced Usage
+### With Custom Configuration
+
+You can override any setting by modifying your `.env` file or setting environment variables:
+
+```bash
+# Example: Run with different batch size
+BATCH_SIZE=8 python main.py
+
+# Example: Run for more epochs
+NUM_EPOCHS=20 python main.py
+```
+
+## 📊 Monitoring Training
+
+### Console Output
+
+The enhanced logging provides:
+- **Rich Console Output**: Beautiful, colored progress bars and status updates
+- **Real-time Metrics**: Live loss tracking and batch progress
+- **Error Handling**: Detailed error messages with stack traces
+- **Summary Tables**: Comprehensive training statistics
+
+### Weights & Biases Dashboard
+
+If W&B is configured, you'll get:
+- **Real-time Metrics**: Loss curves, learning rate, gradient norms
+- **System Monitoring**: GPU usage, memory consumption
+- **Model Artifacts**: Automatic model checkpointing
+- **Experiment Comparison**: Compare different runs
+
+### Log Files
+
+Detailed logs are saved to `logs/training_YYYYMMDD_HHMMSS.log` with:
+- Timestamped entries
+- Debug information
+- Error details
+- Training progress
+
+## 🔍 Troubleshooting
+
+### Common Issues
+
+1. **CUDA Out of Memory**:
+   - Reduce `BATCH_SIZE` in `.env`
+   - Use `DEVICE=cpu` for CPU-only training
+
+2. **W&B Login Issues**:
+   - Verify your API key is correct
+   - Check internet connection
+   - Ensure W&B project exists
+
+3. **Data Loading Errors**:
+   - Verify COCO format files exist
+   - Check file paths in `.env`
+   - Ensure proper permissions
+
+### Error Analysis
+
+The enhanced logging will help identify issues:
+
+- **Invalid Loss Values**: NaN or infinite losses are detected and logged
+- **Gradient Issues**: Gradient norm monitoring helps identify training instability
+- **Batch Failures**: Detailed tracking of successful vs failed batches
+- **Memory Issues**: GPU memory monitoring and warnings
+
+## 📈 Understanding the Training Error
+
+The original error you encountered (`loss.backward()` failure) was likely caused by:
+
+1. **Loss Computation Issues**: The simplified loss function in `EfficientDetModel.compute_loss()` may produce invalid gradients
+2. **Tensor Shape Mismatches**: Operations between tensors of incompatible shapes
+3. **Memory Pressure**: GPU memory exhaustion during backpropagation
+4. **Invalid Target Values**: Ground truth annotations with invalid values
+
+The enhanced version includes:
+- **Loss Validation**: Checks for NaN/infinite values before backpropagation
+- **Gradient Monitoring**: Tracks gradient norms to detect instability
+- **Error Recovery**: Continues training even if some batches fail
+- **Detailed Logging**: Comprehensive error tracking and debugging information
+
+## 🎯 Next Steps
+
+1. **Review Training Plots**: Check the generated plots in `results/`
+2. **Monitor W&B Dashboard**: Analyze training curves and metrics
+3. **Evaluate Model**: Run inference on test set
+4. **Hyperparameter Tuning**: Adjust learning rate, batch size, etc.
+5. **Model Optimization**: Consider different architectures or loss functions
+
+## 📝 Logging Levels
+
+You can adjust logging verbosity by modifying the `setup_logging()` call in `main.py`:
 
 ```python
-# Import modules for custom processing
-from src.data_loader import process_videos_to_images, load_train_data
-from src.visualization import visualize_metrics, visualize_bounding_box
-from src.models import EfficientDetModel
+# For more detailed logging
+logger, log_file = setup_logging(log_level=logging.DEBUG)
 
-# Process videos to images
-process_videos_to_images('/path/to/videos')
-
-# Load and visualize data
-train_data, train_array = load_train_data('/path/to/images')
-metrics_df = pd.read_csv('/path/to/metrics.csv')
-visualize_metrics(metrics_df, 'needle_drop_counts', 'instrument_out_of_view_counts')
-
-# Initialize and train model
-model = EfficientDetModel(num_classes=3)
-# Train model...
+# For less verbose logging
+logger, log_file = setup_logging(log_level=logging.WARNING)
 ```
 
-## 🧠 Models
-
-### ResNet
-
-A customizable implementation of the ResNet architecture for image classification and feature extraction.
-
-- Configurable number of layers
-- Residual connections for better gradient flow
-- Batch normalization for stable training
-
-### EfficientDet
-
-A state-of-the-art object detection model with:
-
-- ResNet50 backbone (pretrained on ImageNet)
-- Bidirectional Feature Pyramid Network (BiFPN) for multi-scale feature fusion
-- Classification and bounding box regression heads
-- Optimized for real-time instrument tracking
-
-## 📊 Results
-
-(Note: This section would include model performance metrics and visualizations from your experiments.)
-
-## 👐 Contributing
-
-Contributions are welcome! Please feel free to submit a pull request or open an issue to discuss potential improvements.
+## 🤝 Contributing
 
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
 
-## 📜 License
+## 📄 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+[Add your license information here]
 
-## 📚 Citations
+## 🙏 Acknowledgments
 
-If you use this code or the SimSurgSkill dataset in your research, please cite the following:
-
-```
-@article{simsurgskill2021,
-  title={SimSurgSkill: A Supervised Learning Approach for Surgical Skill Assessment},
-  author={[Dataset Authors]},
-  journal={[Journal]},
-  year={2021}
-}
-```
-
-## 📧 Contact
-
-Your Name - [your.email@example.com](mailto:your.email@example.com)
-
-Project Link: [https://github.com/yourusername/sim_surg_skill](https://github.com/yourusername/sim_surg_skill)
+- SimSurgSkill dataset creators
+- PyTorch team
+- Weights & Biases team
+- Rich library contributors
