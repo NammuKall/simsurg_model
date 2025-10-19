@@ -3,7 +3,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-COCO format data loader for SimSurgSkill dataset
+COCO format data loader for SimSurgSkill dataset - FIXED VERSION
 """
 import os
 import cv2
@@ -98,240 +98,6 @@ class COCODataset(Dataset):
             
         return sample
 
-def convert_to_coco_format(data_dir, output_dir, train_val_split=0.8):
-    """
-    Convert existing dataset to COCO format
-    
-    Args:
-        data_dir (str): Directory containing SimSurgSkill dataset
-        output_dir (str): Output directory for COCO format data
-        train_val_split (float): Ratio of training to validation data
-    
-    Returns:
-        dict: Dictionary with paths to COCO directories and files
-    """
-    # Create COCO directory structure
-    os.makedirs(os.path.join(output_dir, 'train', 'images'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'val', 'images'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'test', 'images'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'annotations'), exist_ok=True)
-    
-    # Define categories
-    categories = [
-        {"id": 1, "name": "instrument", "supercategory": "instrument"},
-        {"id": 2, "name": "needle", "supercategory": "needle"},
-        {"id": 3, "name": "thread", "supercategory": "thread"}
-    ]
-    
-    # Process data directories
-    print("Processing dataset directories...")
-    v1_images, v1_annotations = process_dataset_dir(
-        os.path.join(data_dir, "train_v1/videos/fps1/"),
-        os.path.join(data_dir, "train_v1/annotations/bounding_box_gt/")
-    )
-    
-    v2_images, v2_annotations = process_dataset_dir(
-        os.path.join(data_dir, "train_v2/videos/fps1/"),
-        os.path.join(data_dir, "train_v2/annotations/bounding_box_gt/")
-    )
-    
-    test_images, test_annotations = process_dataset_dir(
-        os.path.join(data_dir, "test/videos/fps1/"),
-        os.path.join(data_dir, "test/annotations/bounding_box_gt/")
-    )
-    
-    print(f"Found {len(v1_images)} images in train_v1, {len(v2_images)} in train_v2, {len(test_images)} in test")
-    
-    # Combine train_v1 and train_v2 for training data
-    all_train_images = v1_images + v2_images
-    all_train_annotations = {**v1_annotations, **v2_annotations}
-    
-    # Split training data into train and validation sets
-    np.random.seed(42)
-    indices = np.arange(len(all_train_images))
-    np.random.shuffle(indices)
-    split_idx = int(len(all_train_images) * train_val_split)
-    
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
-    
-    train_images = [all_train_images[i] for i in train_indices]
-    val_images = [all_train_images[i] for i in val_indices]
-    
-    print(f"Split data into {len(train_images)} training and {len(val_images)} validation images")
-    
-    # Create COCO datasets
-    print("Creating COCO format datasets...")
-    create_coco_dataset(
-        train_images, 
-        all_train_annotations, 
-        categories, 
-        os.path.join(output_dir, 'train', 'images'),
-        os.path.join(output_dir, 'annotations', 'instances_train.json')
-    )
-    
-    create_coco_dataset(
-        val_images, 
-        all_train_annotations, 
-        categories, 
-        os.path.join(output_dir, 'val', 'images'),
-        os.path.join(output_dir, 'annotations', 'instances_val.json')
-    )
-    
-    create_coco_dataset(
-        test_images, 
-        test_annotations, 
-        categories, 
-        os.path.join(output_dir, 'test', 'images'),
-        os.path.join(output_dir, 'annotations', 'instances_test.json')
-    )
-    
-    # Return paths dictionary
-    return {
-        'train_dir': os.path.join(output_dir, 'train', 'images'),
-        'val_dir': os.path.join(output_dir, 'val', 'images'),
-        'test_dir': os.path.join(output_dir, 'test', 'images'),
-        'train_ann': os.path.join(output_dir, 'annotations', 'instances_train.json'),
-        'val_ann': os.path.join(output_dir, 'annotations', 'instances_val.json'),
-        'test_ann': os.path.join(output_dir, 'annotations', 'instances_test.json')
-    }
-
-def process_dataset_dir(image_dir, annotation_dir):
-    """
-    Process a dataset directory to extract images and annotations
-    
-    Args:
-        image_dir (str): Directory containing images
-        annotation_dir (str): Directory containing annotations
-    
-    Returns:
-        tuple: (list of image paths, dictionary of annotations)
-    """
-    images = []
-    annotations = {}
-    
-    # Check if directories exist
-    if not os.path.exists(image_dir):
-        print(f"Warning: Image directory {image_dir} does not exist")
-        return images, annotations
-        
-    if not os.path.exists(annotation_dir):
-        print(f"Warning: Annotation directory {annotation_dir} does not exist")
-        return images, annotations
-    
-    # Get all image files
-    for file_name in os.listdir(image_dir):
-        if file_name.endswith('.jpeg'):
-            img_path = os.path.join(image_dir, file_name)
-            images.append(img_path)
-            
-            # Find corresponding annotation file
-            base_name = os.path.splitext(file_name)[0]
-            ann_file = os.path.join(annotation_dir, f"{base_name}.json")
-            
-            if os.path.exists(ann_file):
-                try:
-                    with open(ann_file, 'r') as f:
-                        annotations[img_path] = json.load(f)
-                except json.JSONDecodeError:
-                    print(f"Warning: Could not parse annotation file {ann_file}")
-    
-    return images, annotations
-
-def create_coco_dataset(image_paths, annotations, categories, output_img_dir, output_ann_file):
-    """
-    Create a COCO format dataset from images and annotations
-    
-    Args:
-        image_paths (list): List of image paths
-        annotations (dict): Dictionary of annotations by image path
-        categories (list): List of category dictionaries
-        output_img_dir (str): Output directory for images
-        output_ann_file (str): Output file for annotations
-    
-    Returns:
-        dict: COCO format dataset
-    """
-    # Initialize COCO format structure
-    coco_data = {
-        "images": [],
-        "annotations": [],
-        "categories": categories
-    }
-    
-    image_id = 0
-    annotation_id = 0
-    
-    # Process each image
-    for img_path in image_paths:
-        img_name = os.path.basename(img_path)
-        
-        try:
-            # Copy image to output directory
-            shutil.copy(img_path, os.path.join(output_img_dir, img_name))
-            
-            # Read image to get dimensions
-            img = cv2.imread(img_path)
-            if img is None:
-                print(f"Warning: Could not read image {img_path}, skipping")
-                continue
-                
-            height, width = img.shape[:2]
-            
-            # Add image info to COCO format
-            coco_data["images"].append({
-                "id": image_id,
-                "file_name": img_name,
-                "width": width,
-                "height": height
-            })
-            
-            # Process annotations for this image
-            if img_path in annotations:
-                for obj_id, ann in annotations[img_path].items():
-                    if "x_min" in ann and "y_min" in ann and "x_max" in ann and "y_max" in ann:
-                        # Extract bounding box coordinates
-                        x_min = float(ann["x_min"])
-                        y_min = float(ann["y_min"])
-                        x_max = float(ann["x_max"])
-                        y_max = float(ann["y_max"])
-                        
-                        # COCO format uses [x, y, width, height]
-                        width = x_max - x_min
-                        height = y_max - y_min
-                        
-                        # Determine category_id
-                        category_id = 1  # Default
-                        if "class" in ann:
-                            class_name = ann["class"]
-                            for cat in categories:
-                                if cat["name"] == class_name:
-                                    category_id = cat["id"]
-                                    break
-                        
-                        # Create COCO annotation
-                        coco_annotation = {
-                            "id": annotation_id,
-                            "image_id": image_id,
-                            "category_id": category_id,
-                            "bbox": [x_min, y_min, width, height],
-                            "area": width * height,
-                            "iscrowd": 0
-                        }
-                        
-                        coco_data["annotations"].append(coco_annotation)
-                        annotation_id += 1
-            
-            image_id += 1
-        except Exception as e:
-            print(f"Error processing {img_path}: {e}")
-    
-    # Write annotations to file
-    with open(output_ann_file, 'w') as f:
-        json.dump(coco_data, f, indent=2)
-    
-    print(f"Created COCO dataset with {len(coco_data['images'])} images and {len(coco_data['annotations'])} annotations")
-    return coco_data
 
 class Compose:
     """Composes several transforms together"""
@@ -343,10 +109,36 @@ class Compose:
             sample = t(sample)
         return sample
 
+
 class ToTensor:
-    """Convert ndarrays in sample to Tensors"""
+    """Convert ndarrays in sample to Tensors with resizing"""
+    def __init__(self, target_size=(720, 1280)):
+        """
+        Args:
+            target_size: (height, width) to resize images to
+        """
+        self.target_size = target_size
+    
     def __call__(self, sample):
         image, boxes, labels = sample['image'], sample['boxes'], sample['labels']
+        
+        # Get original dimensions
+        orig_height, orig_width = image.shape[:2]
+        target_height, target_width = self.target_size
+        
+        # Resize image
+        image = cv2.resize(image, (target_width, target_height))
+        
+        # Scale bounding boxes
+        if len(boxes) > 0:
+            scale_x = target_width / orig_width
+            scale_y = target_height / orig_height
+            
+            # boxes format is [x_min, y_min, x_max, y_max]
+            boxes[:, 0] *= scale_x  # x_min
+            boxes[:, 1] *= scale_y  # y_min
+            boxes[:, 2] *= scale_x  # x_max
+            boxes[:, 3] *= scale_y  # y_max
         
         # Convert image to tensor
         image = image.transpose((2, 0, 1))  # Convert to (C, H, W)
@@ -358,6 +150,7 @@ class ToTensor:
         sample['image_id'] = torch.tensor([sample['image_id']])
             
         return sample
+
 
 def collate_fn(batch):
     """
@@ -379,7 +172,8 @@ def collate_fn(batch):
     
     return images, targets
 
-def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4):
+
+def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4, target_size=(720, 1280)):
     """
     Get PyTorch DataLoaders for COCO dataset
     
@@ -387,13 +181,14 @@ def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4):
         coco_paths (dict): Dictionary with paths to COCO directories and files
         batch_size (int): Batch size for DataLoader
         num_workers (int): Number of workers for DataLoader
+        target_size (tuple): (height, width) to resize all images to
     
     Returns:
         tuple: (train_loader, val_loader, test_loader)
     """
-    # Define transforms
+    # Define transforms with resizing
     transform = Compose([
-        ToTensor()
+        ToTensor(target_size=target_size)
     ])
     
     # Create datasets
@@ -416,6 +211,7 @@ def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4):
     )
     
     print(f"Created datasets with {len(train_dataset)} training, {len(val_dataset)} validation, and {len(test_dataset)} test samples")
+    print(f"Images will be resized to: {target_size}")
     
     # Create data loaders
     train_loader = DataLoader(
