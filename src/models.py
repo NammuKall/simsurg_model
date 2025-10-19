@@ -9,10 +9,12 @@ Neural network model definitions for the SimSurgSkill dataset
 import torch
 import torch.nn as nn
 from torchvision import models
+import torch.nn.functional as F
 
 
 class ResidualBlock(nn.Module):
     """Basic residual block for ResNet"""
+    
     def __init__(self, in_channels, out_channels, stride=1, downsample=None):
         super(ResidualBlock, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, 
@@ -26,20 +28,26 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x):
         identity = x
+        
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
+        
         out = self.conv2(out)
         out = self.bn2(out)
+        
         if self.downsample is not None:
             identity = self.downsample(x)
+        
         out += identity
         out = self.relu(out)
+        
         return out
 
 
 class ResNet(nn.Module):
     """ResNet model"""
+    
     def __init__(self, block, layers, num_classes=2):
         super(ResNet, self).__init__()
         self.in_channels = 64
@@ -65,11 +73,14 @@ class ResNet(nn.Module):
                           stride=stride, bias=False),
                 nn.BatchNorm2d(out_channels)
             )
+        
         layers = []
         layers.append(block(self.in_channels, out_channels, stride, downsample))
         self.in_channels = out_channels
+        
         for _ in range(1, blocks):
             layers.append(block(self.in_channels, out_channels))
+        
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -77,64 +88,73 @@ class ResNet(nn.Module):
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
+        
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+        
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.fc(x)
+        
         return x
-
-
-class BiFPNBlock(nn.Module):
-    """Bidirectional Feature Pyramid Network block for EfficientDet"""
-    def __init__(self, num_channels, epsilon=1e-4):
-        super(BiFPNBlock, self).__init__()
-        self.epsilon = epsilon
-        self.conv = nn.Sequential(
-            nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(num_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, P3, P4, P5):
-        P5_up = nn.functional.interpolate(P5, scale_factor=2, mode="nearest")
-        P4_up = nn.functional.interpolate(P4, scale_factor=2, mode="nearest")
-        P3_out = self.conv(P3 + P4_up + P5_up)
-        return P3_out
 
 
 class EfficientDetModel(nn.Module):
     """
-    EfficientDet model for object detection
-    FIXED VERSION - accepts both images and targets
+    Simplified EfficientDet-style model for object detection
+    Fixed to handle tensor size mismatches
     """
-    def __init__(self, num_classes=2):
+    
+    def __init__(self, num_classes=2, num_anchors=9):
         super(EfficientDetModel, self).__init__()
         
+        self.num_classes = num_classes
+        self.num_anchors = num_anchors
+        
         # Feature extraction backbone (ResNet50)
-        self.backbone = models.resnet50(pretrained=True)
-        self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])
+        resnet = models.resnet50(pretrained=True)
+        # Get feature layers
+        self.conv1 = resnet.conv1
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
         
-        # BiFPN block
-        self.bifpn = BiFPNBlock(num_channels=2048)
+        self.layer1 = resnet.layer1  # 256 channels
+        self.layer2 = resnet.layer2  # 512 channels
+        self.layer3 = resnet.layer3  # 1024 channels
+        self.layer4 = resnet.layer4  # 2048 channels
         
-        # Projection layer
-        self.projection = nn.Conv2d(2048, 256, kernel_size=1)
+        # Reduce channel dimensions to a common size
+        self.reduce_channels = nn.ModuleDict({
+            'P3': nn.Conv2d(512, 256, kernel_size=1),   # from layer2
+            'P4': nn.Conv2d(1024, 256, kernel_size=1),  # from layer3
+            'P5': nn.Conv2d(2048, 256, kernel_size=1)   # from layer4
+        })
         
-        # Classification head
+        # Feature fusion convolutions
+        self.fusion_conv = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Detection heads
         self.class_head = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(256, num_classes, kernel_size=3, padding=1)
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, num_anchors * num_classes, kernel_size=3, padding=1)
         )
         
-        # Bounding box regression head
         self.box_head = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(256, 4, kernel_size=3, padding=1)
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, num_anchors * 4, kernel_size=3, padding=1)
         )
 
     def forward(self, x, targets=None):
@@ -142,81 +162,153 @@ class EfficientDetModel(nn.Module):
         Forward pass
         
         Args:
-            x (Tensor): Input images of shape [batch_size, 3, H, W]
-            targets (list of dict, optional): Ground truth targets for training.
-                Each dict contains 'boxes' and 'labels' keys.
-        
+            x: Input images [batch_size, 3, H, W]
+            targets: Ground truth annotations (optional, for training)
+            
         Returns:
-            dict: During training returns {'loss': tensor}
-            list: During inference returns list of predictions per image
+            If training (targets provided): dict with 'loss'
+            If inference: dict with 'boxes', 'scores', 'labels'
         """
+        batch_size = x.shape[0]
+        
         # Extract features from backbone
-        features = self.backbone(x)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
         
-        # Apply BiFPN
-        refined_features = self.bifpn(features, features, features)
+        c2 = self.layer1(x)   # stride 4
+        c3 = self.layer2(c2)  # stride 8
+        c4 = self.layer3(c3)  # stride 16
+        c5 = self.layer4(c4)  # stride 32
         
-        # Project to smaller number of channels
-        projected_features = self.projection(refined_features)
+        # Reduce to common channel size
+        p3 = self.reduce_channels['P3'](c3)
+        p4 = self.reduce_channels['P4'](c4)
+        p5 = self.reduce_channels['P5'](c5)
         
-        # Get classification and bounding box predictions
-        class_logits = self.class_head(projected_features)
-        bbox_regression = self.box_head(projected_features)
+        # Upsample P5 and P4 to match P3 size
+        p5_upsampled = F.interpolate(p5, size=p3.shape[2:], mode='nearest')
+        p4_upsampled = F.interpolate(p4, size=p3.shape[2:], mode='nearest')
         
-        # Reshape predictions
-        batch_size = class_logits.size(0)
-        num_classes = class_logits.size(1)
+        # Fuse features
+        fused_features = self.fusion_conv(p3 + p4_upsampled + p5_upsampled)
         
-        # Flatten spatial dimensions: [B, C, H, W] -> [B, H*W, C]
+        # Get predictions
+        class_logits = self.class_head(fused_features)
+        bbox_regression = self.box_head(fused_features)
+        
+        # Reshape outputs
+        # class_logits: [B, num_anchors * num_classes, H, W] -> [B, H*W*num_anchors, num_classes]
+        # bbox_regression: [B, num_anchors * 4, H, W] -> [B, H*W*num_anchors, 4]
+        
+        B, _, H, W = class_logits.shape
+        
         class_logits = class_logits.permute(0, 2, 3, 1).contiguous()
-        class_logits = class_logits.view(batch_size, -1, num_classes)
+        class_logits = class_logits.view(B, -1, self.num_classes)
         
         bbox_regression = bbox_regression.permute(0, 2, 3, 1).contiguous()
-        bbox_regression = bbox_regression.view(batch_size, -1, 4)
+        bbox_regression = bbox_regression.view(B, -1, 4)
         
-        # Training mode: compute loss
         if self.training and targets is not None:
-            # Simplified loss computation
-            # In a real implementation, you would:
-            # 1. Match predictions to ground truth using IoU
-            # 2. Compute classification loss on matched predictions
-            # 3. Compute regression loss on matched predictions
-            
-            # For now, use a placeholder loss to make training work
-            # This encourages the model to produce reasonable outputs
-            classification_loss = torch.mean(torch.abs(class_logits))
-            regression_loss = torch.mean(torch.abs(bbox_regression))
-            
-            # Combine losses
-            total_loss = classification_loss + regression_loss
-            
-            return {
-                'loss': total_loss,
-                'class_logits': class_logits,
-                'bbox_regression': bbox_regression
-            }
-        
-        # Inference mode: return predictions
+            # Training mode: compute loss
+            loss = self.compute_loss(class_logits, bbox_regression, targets)
+            return {'loss': loss}
         else:
-            # Apply softmax to get class probabilities
-            class_probs = torch.softmax(class_logits, dim=-1)
+            # Inference mode: return predictions
+            return self.postprocess_predictions(class_logits, bbox_regression)
+    
+    def compute_loss(self, class_logits, bbox_regression, targets):
+        """
+        Compute detection loss (simplified version)
+        
+        Args:
+            class_logits: [B, num_predictions, num_classes]
+            bbox_regression: [B, num_predictions, 4]
+            targets: List of target dicts with 'boxes' and 'labels'
+        """
+        # This is a simplified loss - you should use proper detection loss
+        # For now, we'll use a basic focal loss for classification
+        
+        device = class_logits.device
+        batch_size = class_logits.shape[0]
+        
+        classification_loss = torch.tensor(0.0, device=device)
+        regression_loss = torch.tensor(0.0, device=device)
+        
+        for i in range(batch_size):
+            # Get ground truth
+            gt_boxes = targets[i]['boxes']
+            gt_labels = targets[i]['labels']
             
-            # Get predictions for each image in the batch
-            predictions = []
-            for i in range(batch_size):
-                # Get maximum class probability and predicted class for each anchor
-                max_probs, pred_classes = class_probs[i].max(dim=-1)
-                
-                # Filter predictions by confidence threshold
-                confidence_threshold = 0.05
-                keep_mask = max_probs > confidence_threshold
-                
-                # Create prediction dictionary for this image
-                pred = {
-                    'boxes': bbox_regression[i][keep_mask],
-                    'scores': max_probs[keep_mask],
-                    'labels': pred_classes[keep_mask]
-                }
-                predictions.append(pred)
+            if len(gt_boxes) == 0:
+                continue
             
-            return predictions
+            # Simplified: just compute cross entropy on first prediction
+            # In practice, you'd match predictions to ground truth
+            pred_scores = torch.softmax(class_logits[i][:len(gt_labels)], dim=-1)
+            target_labels = gt_labels.long() - 1  # Convert to 0-indexed
+            
+            # Clamp to valid range
+            target_labels = torch.clamp(target_labels, 0, self.num_classes - 1)
+            
+            # Classification loss
+            classification_loss += F.cross_entropy(
+                class_logits[i][:len(gt_labels)], 
+                target_labels
+            )
+            
+            # Regression loss (L1)
+            if len(gt_boxes) > 0:
+                pred_boxes = bbox_regression[i][:len(gt_boxes)]
+                regression_loss += F.l1_loss(pred_boxes, gt_boxes.float())
+        
+        # Average over batch
+        total_loss = (classification_loss + regression_loss) / batch_size
+        
+        return total_loss
+    
+    def postprocess_predictions(self, class_logits, bbox_regression, score_threshold=0.5):
+        """
+        Convert raw predictions to final detections
+        
+        Returns:
+            List of dicts with 'boxes', 'scores', 'labels' for each image in batch
+        """
+        batch_size = class_logits.shape[0]
+        results = []
+        
+        for i in range(batch_size):
+            # Get scores and labels
+            scores = torch.softmax(class_logits[i], dim=-1)
+            max_scores, labels = scores.max(dim=-1)
+            
+            # Filter by score threshold
+            keep = max_scores > score_threshold
+            
+            filtered_boxes = bbox_regression[i][keep]
+            filtered_scores = max_scores[keep]
+            filtered_labels = labels[keep] + 1  # Convert back to 1-indexed
+            
+            results.append({
+                'boxes': filtered_boxes,
+                'scores': filtered_scores,
+                'labels': filtered_labels
+            })
+        
+        return results
+
+
+# Convenience function to create model
+def create_efficientdet_model(num_classes=2, pretrained=True):
+    """
+    Create EfficientDet model
+    
+    Args:
+        num_classes: Number of object classes (default: 2 for needle and needle_driver)
+        pretrained: Use pretrained ResNet50 backbone
+    
+    Returns:
+        EfficientDetModel instance
+    """
+    return EfficientDetModel(num_classes=num_classes)
