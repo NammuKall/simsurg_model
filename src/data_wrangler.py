@@ -5,6 +5,7 @@
 """
 Data Wrangler - Validate and organize annotations with corresponding images
 Ensures data integrity before COCO conversion
+FIXED: Only extracts frame_id=1 annotations to match fps=1 extracted images
 """
 
 import os
@@ -87,9 +88,9 @@ class DataWrangler:
                 logger.warning(f"Invalid coordinates: x={x}, y={y}, w={w}, h={h}")
                 return False
             
-            if x + w > image_width or y + h > image_height:
-                logger.warning(f"Coordinates out of bounds: x+w={x+w}, y+h={y+h}")
-                # Don't reject, just warn - some annotations might be slightly out of bounds
+            if x + w > image_width * 1.1 or y + h > image_height * 1.1:
+                # Allow 10% tolerance for slight overflows
+                logger.debug(f"Coordinates slightly out of bounds: x+w={x+w}, y+h={y+h}")
             
             return True
             
@@ -100,6 +101,7 @@ class DataWrangler:
     def wrangle_split(self, split_name):
         """
         Wrangle data for a single split
+        FIXED: Only extracts annotations where frame_id == 1.0
         
         Args:
             split_name (str): Name of the split (train_v1, train_v2, or test)
@@ -144,9 +146,9 @@ class DataWrangler:
                 try:
                     # Load annotation file
                     with open(ann_path, 'r') as f:
-                        annotations = json.load(f)
+                        all_annotations = json.load(f)
                     
-                    # Get image dimensions (read once for validation)
+                    # Get image dimensions
                     img = cv2.imread(str(img_path))
                     if img is None:
                         logger.warning(f"Could not read image: {img_path}")
@@ -155,24 +157,37 @@ class DataWrangler:
                     
                     img_height, img_width = img.shape[:2]
                     
-                    # Validate and process annotations
+                    # CRITICAL FIX: Only extract annotations for frame_id == 1
+                    # Since we extracted images at fps=1, each image is the FIRST frame
+                    # The JSON file contains annotations for ALL frames (1-126+)
+                    # We only want annotations for frame_id == 1.0
+                    
                     valid_annotations = []
-                    for ann_id, ann in annotations.items():
-                        if self.validate_annotation(ann, img_width, img_height):
-                            # Parse coordinates
-                            coords = self.parse_coordinate_string(ann['coordinate'])
-                            
-                            # Create standardized annotation
-                            valid_annotations.append({
-                                'annotation_id': ann_id,
-                                'obj_class': ann['obj_class'],
-                                'bbox': [coords['x'], coords['y'], coords['w'], coords['h']],
-                                'orientation': ann['orientation'],
-                                'frame_id': ann['frame_id'],
-                                'case_id': ann.get('case_id', None)
-                            })
-                        else:
-                            self.stats[split_name]['invalid_annotations'] += 1
+                    frame_1_found = False
+                    
+                    for ann_id, ann in all_annotations.items():
+                        # Only process annotations for frame_id == 1
+                        if ann.get('frame_id') == 1.0:
+                            frame_1_found = True
+                            if self.validate_annotation(ann, img_width, img_height):
+                                # Parse coordinates
+                                coords = self.parse_coordinate_string(ann['coordinate'])
+                                
+                                # Create standardized annotation
+                                valid_annotations.append({
+                                    'annotation_id': ann_id,
+                                    'obj_class': ann['obj_class'],
+                                    'bbox': [coords['x'], coords['y'], coords['w'], coords['h']],
+                                    'orientation': ann['orientation'],
+                                    'frame_id': ann['frame_id'],
+                                    'case_id': ann.get('case_id', None)
+                                })
+                            else:
+                                self.stats[split_name]['invalid_annotations'] += 1
+                    
+                    if not frame_1_found:
+                        logger.warning(f"No frame_id=1 annotations found for {img_name}")
+                        self.stats[split_name]['no_frame_1'] += 1
                     
                     if valid_annotations:
                         # Create wrangled record
@@ -189,11 +204,13 @@ class DataWrangler:
                         self.stats[split_name]['valid_pairs'] += 1
                         self.stats[split_name]['total_annotations'] += len(valid_annotations)
                     else:
-                        logger.warning(f"No valid annotations for {img_name}")
+                        logger.warning(f"No valid annotations for {img_name} at frame_id=1")
                         self.stats[split_name]['no_valid_annotations'] += 1
                     
                 except Exception as e:
                     logger.error(f"Error processing {img_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     self.stats[split_name]['processing_errors'] += 1
             else:
                 logger.warning(f"No annotation found for image: {img_name}")
@@ -241,6 +258,10 @@ class DataWrangler:
             logger.info(f"  Valid pairs: {self.stats[split]['valid_pairs']}")
             logger.info(f"  Total annotations: {self.stats[split]['total_annotations']}")
             
+            if self.stats[split]['valid_pairs'] > 0:
+                avg_ann = self.stats[split]['total_annotations'] / self.stats[split]['valid_pairs']
+                logger.info(f"  Avg annotations/image: {avg_ann:.1f}")
+            
             if self.stats[split]['missing_annotations'] > 0:
                 logger.info(f"  ⚠️  Missing annotations: {self.stats[split]['missing_annotations']}")
             if self.stats[split]['missing_images'] > 0:
@@ -257,7 +278,9 @@ class DataWrangler:
         logger.info(f"\nOVERALL:")
         logger.info(f"  Total valid pairs: {total_pairs}")
         logger.info(f"  Total annotations: {total_annotations}")
-        logger.info(f"  Average annotations per image: {total_annotations/total_pairs:.2f}" if total_pairs > 0 else "  No valid pairs")
+        if total_pairs > 0:
+            logger.info(f"  Average annotations per image: {total_annotations/total_pairs:.1f}")
+            logger.info(f"  Expected: ~3 annotations per image (1 needle + 2 needle drivers)")
     
     def save_wrangled_data(self, output_file='wrangled_data.json'):
         """
