@@ -259,6 +259,14 @@ def main():
             "model_architecture": "EfficientDetModel"
         })
     
+    # Performance tracking
+    performance_history = {
+        'train_loss': [],
+        'val_loss': [],
+        'avg_batch_time': [],
+        'samples_per_sec': []
+    }
+    
     # Training loop
     num_epochs = int(os.getenv("NUM_EPOCHS", "10"))
     train_losses = []
@@ -273,8 +281,9 @@ def main():
     
     logger.info(f"Starting training for {num_epochs} epochs")
     
-    for epoch in range(num_epochs):
+        for epoch in range(num_epochs):
         epoch_start_time = time.time()
+        batch_times = []
         
         console.print(f"\n[bold blue]📊 Epoch [{epoch+1}/{num_epochs}][/bold blue]")
         logger.info(f"Starting epoch {epoch+1}/{num_epochs}")
@@ -298,6 +307,7 @@ def main():
             train_task = progress.add_task(f"Training Epoch {epoch+1}", total=len(train_loader))
             
             for i, (images, targets) in enumerate(train_loader):
+                batch_start_time = time.time()
                 try:
                     # Move data to device
                     images = images.to(device)
@@ -343,6 +353,11 @@ def main():
                         num_batches += 1
                         successful_batches += 1
                         
+                        # Track batch performance
+                        batch_time = time.time() - batch_start_time
+                        batch_times.append(batch_time)
+                        samples_per_sec = batch_size / batch_time if batch_time > 0 else 0
+                        
                         # Log to W&B
                         if wandb_api_key and i % 10 == 0:
                             wandb.log({
@@ -350,11 +365,15 @@ def main():
                                 "batch": i,
                                 "train_loss": loss.item(),
                                 "grad_norm": grad_norm,
-                                "learning_rate": optimizer.param_groups[0]['lr']
+                                "learning_rate": optimizer.param_groups[0]['lr'],
+                                "batch_time": batch_time,
+                                "samples_per_sec": samples_per_sec
                             })
                         
                         if (i + 1) % 10 == 0:
-                            logger.info(f'Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}, Grad Norm: {grad_norm:.4f}')
+                            logger.info(f'Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}, '
+                                       f'Grad Norm: {grad_norm:.4f}, Batch Time: {batch_time:.3f}s, '
+                                       f'Speed: {samples_per_sec:.1f} samples/sec')
                     else:
                         logger.warning(f"Unexpected output format at batch {i}: {type(outputs)}")
                         failed_batches += 1
@@ -371,13 +390,21 @@ def main():
         avg_train_loss = train_loss / num_batches if num_batches > 0 else 0
         train_losses.append(avg_train_loss)
         
-        # Log epoch training results
+        # Performance metrics
+        avg_batch_time = np.mean(batch_times) if batch_times else 0
+        avg_samples_per_sec = np.mean([batch_size / t for t in batch_times if t > 0]) if batch_times else 0
+        performance_history['avg_batch_time'].append(avg_batch_time)
+        performance_history['samples_per_sec'].append(avg_samples_per_sec)
+        
+        # Log epoch training results with performance
         console.print(f"[green]📈 Training Loss:[/green] {avg_train_loss:.4f} | "
-                    f"[green]Successful Batches:[/green] {successful_batches} | "
-                    f"[red]Failed Batches:[/red] {failed_batches}")
+                    f"[green]Successful:[/green] {successful_batches} | "
+                    f"[red]Failed:[/red] {failed_batches} | "
+                    f"[yellow]Speed:[/yellow] {avg_samples_per_sec:.1f} samples/sec")
         
         logger.info(f"Epoch {epoch+1} training completed - Loss: {avg_train_loss:.4f}, "
-                   f"Successful: {successful_batches}, Failed: {failed_batches}")
+                   f"Successful: {successful_batches}, Failed: {failed_batches}, "
+                   f"Avg Batch Time: {avg_batch_time:.3f}s, Speed: {avg_samples_per_sec:.1f} samples/sec")
         
         # Validation phase
         model.eval()
@@ -452,7 +479,9 @@ def main():
                 "epoch_val_loss": avg_val_loss,
                 "epoch_time": epoch_time,
                 "train_success_rate": successful_batches / (successful_batches + failed_batches) if (successful_batches + failed_batches) > 0 else 0,
-                "val_success_rate": val_successful_batches / (val_successful_batches + val_failed_batches) if (val_successful_batches + val_failed_batches) > 0 else 0
+                "val_success_rate": val_successful_batches / (val_successful_batches + val_failed_batches) if (val_successful_batches + val_failed_batches) > 0 else 0,
+                "avg_batch_time": avg_batch_time,
+                "samples_per_sec": avg_samples_per_sec
             })
         
         # Early stopping check (optional)

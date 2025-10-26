@@ -26,9 +26,9 @@ This project provides an enhanced object detection model training pipeline for t
    ```
 
 2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
 
 3. **Set up environment variables**:
    ```bash
