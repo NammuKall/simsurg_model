@@ -281,7 +281,7 @@ def main():
     
     logger.info(f"Starting training for {num_epochs} epochs")
     
-        for epoch in range(num_epochs):
+    for epoch in range(num_epochs):
         epoch_start_time = time.time()
         batch_times = []
         
