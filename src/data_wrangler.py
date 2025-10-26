@@ -1,4 +1,4 @@
-#data_wranger.py
+#data_wrangler.py
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -49,13 +49,41 @@ class DataWrangler:
             coord_str (str): Coordinate string like '{"h": 108, "w": 77, "x": 625, "y": 420}'
             
         Returns:
-            dict: Parsed coordinates
+            dict: Parsed coordinates or None if parsing fails
         """
+        # Handle None or empty values
+        if coord_str is None:
+            logger.warning("Coordinate string is None")
+            return None
+        
+        if not isinstance(coord_str, str):
+            logger.warning(f"Coordinate is not a string: {type(coord_str)} - {coord_str}")
+            # If it's already a dict, return it
+            if isinstance(coord_str, dict):
+                return coord_str
+            return None
+        
+        if not coord_str.strip():
+            logger.warning("Coordinate string is empty")
+            return None
+        
         try:
-            return json.loads(coord_str)
+            coords = json.loads(coord_str)
+            
+            # Validate that we have all required keys
+            required_keys = ['x', 'y', 'w', 'h']
+            if not all(key in coords for key in required_keys):
+                logger.warning(f"Missing required keys in coordinates: {coords}")
+                return None
+            
+            return coords
+            
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse coordinate string: {coord_str}")
-            raise e
+            logger.error(f"Failed to parse coordinate string: {coord_str} - Error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error parsing coordinates: {coord_str} - Error: {e}")
+            return None
     
     def validate_annotation(self, annotation, image_width=1280, image_height=720):
         """
@@ -70,15 +98,20 @@ class DataWrangler:
             bool: True if valid, False otherwise
         """
         try:
-            # Parse coordinates
-            coords = self.parse_coordinate_string(annotation['coordinate'])
-            
             # Check required fields
             required_fields = ['obj_class', 'coordinate', 'orientation', 'frame_id']
             for field in required_fields:
                 if field not in annotation:
                     logger.warning(f"Missing field: {field}")
                     return False
+            
+            # Parse coordinates
+            coords = self.parse_coordinate_string(annotation['coordinate'])
+            
+            # Check if parsing was successful
+            if coords is None:
+                logger.warning(f"Failed to parse coordinates for annotation")
+                return False
             
             # Validate coordinate values
             x, y, w, h = coords['x'], coords['y'], coords['w'], coords['h']
