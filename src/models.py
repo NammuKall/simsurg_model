@@ -114,7 +114,7 @@ class EfficientDetModel(nn.Module):
         self.num_anchors = num_anchors
         
         # Feature extraction backbone (ResNet50)
-        resnet = models.resnet50(pretrained=True)
+        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         # Get feature layers
         self.conv1 = resnet.conv1
         self.bn1 = resnet.bn1
@@ -306,13 +306,13 @@ class EfficientDetModel(nn.Module):
 
 
 # Convenience function to create model
-def create_efficientdet_model(num_classes=2, pretrained=True):
+def create_efficientdet_model(num_classes=2, weights=True):
     """
     Create EfficientDet model
     
     Args:
         num_classes: Number of object classes (default: 2 for needle and needle_driver)
-        pretrained: Use pretrained ResNet50 backbone
+        weights: Use pretrained ImageNet weights for ResNet50 backbone
     
     Returns:
         EfficientDetModel instance
