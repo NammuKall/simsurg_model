@@ -163,11 +163,11 @@ class EfficientDetModel(nn.Module):
         
         Args:
             x: Input images [batch_size, 3, H, W]
-            targets: Ground truth annotations (optional, for training)
+            targets: Ground truth annotations (optional)
             
         Returns:
-            If training (targets provided): dict with 'loss'
-            If inference: dict with 'boxes', 'scores', 'labels'
+            If targets provided: dict with 'loss'
+            If inference (no targets): list of dicts with 'boxes', 'scores', 'labels'
         """
         batch_size = x.shape[0]
         
@@ -210,8 +210,8 @@ class EfficientDetModel(nn.Module):
         bbox_regression = bbox_regression.permute(0, 2, 3, 1).contiguous()
         bbox_regression = bbox_regression.view(B, -1, 4)
         
-        if self.training and targets is not None:
-            # Training mode: compute loss
+        if targets is not None:
+            # Compute loss when targets are provided (training or validation)
             loss = self.compute_loss(class_logits, bbox_regression, targets)
             return {'loss': loss}
         else:
