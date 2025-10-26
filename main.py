@@ -32,9 +32,139 @@ load_dotenv()
 # Import local modules
 from src.models import EfficientDetModel
 from src.coco_data_loader import get_coco_data_loaders
+from src.utils import IOU
 
 # Initialize rich console for beautiful output
 console = Console()
+
+
+def compute_detection_metrics(model, data_loader, device, num_samples=None):
+    """
+    Compute detection metrics (IoU, precision, recall, mAP) on validation set
+    
+    Args:
+        model: The model to evaluate
+        data_loader: Data loader for validation set
+        device: Torch device
+        num_samples: Number of samples to evaluate (None = all samples)
+    
+    Returns:
+        dict: Dictionary of metrics
+    """
+    model.eval()
+    
+    all_predictions = []
+    all_targets = []
+    sample_count = 0
+    
+    with torch.no_grad():
+        for batch_idx, (images, targets) in enumerate(data_loader):
+            if num_samples and sample_count >= num_samples:
+                break
+                
+            images = images.to(device)
+            
+            # Move targets to device for loss computation (but we won't use loss mode)
+            val_targets = []
+            for j in range(len(targets)):
+                val_targets.append({
+                    'boxes': targets[j]['boxes'].to(device),
+                    'labels': targets[j]['labels'].to(device),
+                    'image_id': targets[j]['image_id'].to(device) if 'image_id' in targets[j] else torch.tensor([j], device=device)
+                })
+            
+            # Get predictions in inference mode (without targets)
+            outputs = model(images)
+            
+            # Store predictions and targets
+            for i in range(len(images)):
+                if isinstance(outputs, list) and len(outputs) > i:
+                    pred = outputs[i]
+                    all_predictions.append({
+                        'boxes': pred['boxes'].cpu(),
+                        'scores': pred['scores'].cpu(),
+                        'labels': pred['labels'].cpu()
+                    })
+                    
+                    all_targets.append({
+                        'boxes': val_targets[i]['boxes'].cpu(),
+                        'labels': val_targets[i]['labels'].cpu()
+                    })
+                    sample_count += 1
+    
+    if len(all_predictions) == 0:
+        return {
+            'mean_iou': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
+            'true_positives': 0, 'false_positives': 0, 'false_negatives': 0
+        }
+    
+    # Compute metrics
+    true_positives = 0
+    false_positives = 0
+    false_negatives = 0
+    iou_scores = []
+    
+    for pred, target in zip(all_predictions, all_targets):
+        pred_boxes = pred['boxes']
+        pred_scores = pred['scores']
+        pred_labels = pred['labels']
+        
+        gt_boxes = target['boxes']
+        gt_labels = target['labels']
+        
+        if len(gt_boxes) == 0:
+            false_positives += len(pred_boxes)
+            continue
+        
+        # Match predictions to ground truths
+        matched_gts = set()
+        matched_preds = set()
+        
+        for gt_idx, (gt_box, gt_label) in enumerate(zip(gt_boxes, gt_labels)):
+            best_iou = 0.0
+            best_pred_idx = -1
+            
+            for pred_idx, (pred_box, pred_label) in enumerate(zip(pred_boxes, pred_labels)):
+                if pred_idx in matched_preds:
+                    continue
+                
+                if pred_label != gt_label:
+                    continue
+                
+                # Calculate IoU
+                iou = IOU(pred_box.numpy(), gt_box.numpy())
+                
+                if iou > best_iou:
+                    best_iou = iou
+                    best_pred_idx = pred_idx
+            
+            if best_iou >= 0.5 and best_pred_idx >= 0:  # IoU threshold
+                true_positives += 1
+                matched_gts.add(gt_idx)
+                matched_preds.add(best_pred_idx)
+                iou_scores.append(best_iou)
+            else:
+                false_negatives += 1
+        
+        # Unmatched predictions are false positives
+        false_positives += len(pred_boxes) - len(matched_preds)
+    
+    # Calculate metrics
+    mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else 0.0
+    
+    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0.0
+    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0.0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    return {
+        'mean_iou': float(mean_iou),
+        'precision': float(precision),
+        'recall': float(recall),
+        'f1_score': float(f1_score),
+        'true_positives': int(true_positives),
+        'false_positives': int(false_positives),
+        'false_negatives': int(false_negatives)
+    }
 
 # Configure enhanced logging
 def setup_logging(log_level=logging.INFO):
@@ -142,7 +272,10 @@ def main():
                 "num_epochs": int(os.getenv("NUM_EPOCHS", "10")),
                 "model": "EfficientDetModel",
                 "dataset": "SimSurgSkill",
-                "num_classes": 2
+                "num_classes": 2,
+                "optimizer": "Adam",
+                "loss_function": "CrossEntropy + SmoothL1Loss",
+                "evaluation_frequency": "Every 100 batches + end of epoch"
             }
         )
         logger.info("W&B run initialized")
@@ -229,7 +362,9 @@ def main():
             wandb.config.update({
                 "device": str(device),
                 "gpu_name": gpu_name,
-                "gpu_memory_gb": gpu_memory
+                "gpu_memory_gb": gpu_memory,
+                "cuda_version": torch.version.cuda,
+                "torch_version": torch.__version__
             })
     else:
         console.print(f"[yellow]CPU Training Mode[/yellow] - Consider reducing batch size for better performance")
@@ -272,6 +407,12 @@ def main():
     train_losses = []
     val_losses = []
     
+    # Track best model
+    best_val_loss = float('inf')
+    best_val_iou = 0.0
+    best_epoch = 0
+    best_model_state = None
+    
     console.print(Panel.fit(
         f"[bold green]STARTING TRAINING[/bold green]\n"
         f"Epochs: {num_epochs} | Batch Size: {batch_size} | Learning Rate: {learning_rate}",
@@ -294,6 +435,7 @@ def main():
         num_batches = 0
         successful_batches = 0
         failed_batches = 0
+        batch_losses = []  # Track individual batch losses for detailed logging
         
         # Create progress bar for training
         with Progress(
@@ -349,7 +491,9 @@ def main():
                         
                         optimizer.step()
                         
-                        train_loss += loss.item()
+                        loss_value = loss.item()
+                        train_loss += loss_value
+                        batch_losses.append(loss_value)
                         num_batches += 1
                         successful_batches += 1
                         
@@ -358,22 +502,49 @@ def main():
                         batch_times.append(batch_time)
                         samples_per_sec = batch_size / batch_time if batch_time > 0 else 0
                         
-                        # Log to W&B
+                        # Log to W&B (every 10 batches for detailed tracking)
                         if wandb_api_key and i % 10 == 0:
-                            wandb.log({
-                                "epoch": epoch,
-                                "batch": i,
-                                "train_loss": loss.item(),
+                            log_dict = {
+                                "batch_train_loss": loss.item(),
+                                "batch": i + epoch * len(train_loader),
                                 "grad_norm": grad_norm,
                                 "learning_rate": optimizer.param_groups[0]['lr'],
                                 "batch_time": batch_time,
                                 "samples_per_sec": samples_per_sec
-                            })
+                            }
+                            
+                            # Add GPU memory usage if available
+                            if torch.cuda.is_available():
+                                log_dict["gpu_memory_allocated_mb"] = torch.cuda.memory_allocated(0) / 1024**2
+                                log_dict["gpu_memory_reserved_mb"] = torch.cuda.memory_reserved(0) / 1024**2
+                            
+                            wandb.log(log_dict)
                         
                         if (i + 1) % 10 == 0:
                             logger.info(f'Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}, '
                                        f'Grad Norm: {grad_norm:.4f}, Batch Time: {batch_time:.3f}s, '
                                        f'Speed: {samples_per_sec:.1f} samples/sec')
+                        
+                        # Periodic quick evaluation every 100 batches
+                        if (i + 1) % 100 == 0 and wandb_api_key:
+                            logger.info(f"Running periodic evaluation at batch {i+1}")
+                            try:
+                                eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20)
+                                
+                                wandb.log({
+                                    "periodic_mean_iou": eval_metrics['mean_iou'],
+                                    "periodic_precision": eval_metrics['precision'],
+                                    "periodic_recall": eval_metrics['recall'],
+                                    "periodic_f1_score": eval_metrics['f1_score'],
+                                    "periodic_batch": i + 1 + epoch * len(train_loader)
+                                })
+                                
+                                logger.info(f"Periodic Eval - IoU: {eval_metrics['mean_iou']:.3f}, "
+                                           f"Precision: {eval_metrics['precision']:.3f}, "
+                                           f"Recall: {eval_metrics['recall']:.3f}, "
+                                           f"F1: {eval_metrics['f1_score']:.3f}")
+                            except Exception as e:
+                                logger.warning(f"Periodic evaluation failed: {e}")
                     else:
                         logger.warning(f"Unexpected output format at batch {i}: {type(outputs)}")
                         failed_batches += 1
@@ -396,6 +567,11 @@ def main():
         performance_history['avg_batch_time'].append(avg_batch_time)
         performance_history['samples_per_sec'].append(avg_samples_per_sec)
         
+        # Compute additional batch loss statistics for detailed logging
+        min_batch_loss = np.min(batch_losses) if batch_losses else 0
+        max_batch_loss = np.max(batch_losses) if batch_losses else 0
+        std_batch_loss = np.std(batch_losses) if batch_losses else 0
+        
         # Log epoch training results with performance
         console.print(f"[green]📈 Training Loss:[/green] {avg_train_loss:.4f} | "
                     f"[green]Successful:[/green] {successful_batches} | "
@@ -412,6 +588,7 @@ def main():
         num_val_batches = 0
         val_successful_batches = 0
         val_failed_batches = 0
+        val_batch_losses = []  # Track individual validation batch losses
         
         with torch.no_grad():
             with Progress(
@@ -443,7 +620,9 @@ def main():
                             
                             # Check for invalid loss values
                             if not (torch.isnan(loss) or torch.isinf(loss)):
-                                val_loss += loss.item()
+                                loss_value = loss.item()
+                                val_loss += loss_value
+                                val_batch_losses.append(loss_value)
                                 num_val_batches += 1
                                 val_successful_batches += 1
                             else:
@@ -462,6 +641,11 @@ def main():
         avg_val_loss = val_loss / num_val_batches if num_val_batches > 0 else 0
         val_losses.append(avg_val_loss)
         
+        # Compute validation batch loss statistics
+        min_val_batch_loss = np.min(val_batch_losses) if val_batch_losses else 0
+        max_val_batch_loss = np.max(val_batch_losses) if val_batch_losses else 0
+        std_val_batch_loss = np.std(val_batch_losses) if val_batch_losses else 0
+        
         # Log epoch validation results
         console.print(f"[blue]📉 Validation Loss:[/blue] {avg_val_loss:.4f} | "
                     f"[green]Successful Batches:[/green] {val_successful_batches} | "
@@ -470,19 +654,76 @@ def main():
         logger.info(f"Epoch {epoch+1} validation completed - Loss: {avg_val_loss:.4f}, "
                    f"Successful: {val_successful_batches}, Failed: {val_failed_batches}")
         
-        # Log epoch summary to W&B
+        # Run comprehensive evaluation on validation set
+        console.print("[yellow]🔍 Running validation evaluation...[/yellow]")
+        logger.info("Computing comprehensive evaluation metrics on validation set")
+        
+        eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None)
+        
+        console.print(f"[green]📊 Eval Metrics - IoU:[/green] {eval_metrics['mean_iou']:.3f} | "
+                    f"[green]Precision:[/green] {eval_metrics['precision']:.3f} | "
+                    f"[green]Recall:[/green] {eval_metrics['recall']:.3f} | "
+                    f"[green]F1 Score:[/green] {eval_metrics['f1_score']:.3f}")
+        
+        console.print(f"[cyan]Detection Stats - TP:[/cyan] {eval_metrics['true_positives']} | "
+                    f"[red]FP:[/red] {eval_metrics['false_positives']} | "
+                    f"[yellow]FN:[/yellow] {eval_metrics['false_negatives']}")
+        
+        logger.info(f"Eval Metrics - IoU: {eval_metrics['mean_iou']:.3f}, "
+                   f"Precision: {eval_metrics['precision']:.3f}, "
+                   f"Recall: {eval_metrics['recall']:.3f}, "
+                   f"F1: {eval_metrics['f1_score']:.3f}")
+        
+        # Log epoch summary to W&B (primary metrics that match console output)
         if wandb_api_key:
             epoch_time = time.time() - epoch_start_time
             wandb.log({
                 "epoch": epoch,
-                "epoch_train_loss": avg_train_loss,
-                "epoch_val_loss": avg_val_loss,
+                # Primary losses (these match what's shown in console)
+                "train_loss": avg_train_loss,
+                "val_loss": avg_val_loss,
+                # Training batch-level statistics for detailed analysis
+                "train_batch_loss_min": min_batch_loss,
+                "train_batch_loss_max": max_batch_loss,
+                "train_batch_loss_std": std_batch_loss,
+                "train_batch_loss_avg": avg_train_loss,
+                # Validation batch-level statistics
+                "val_batch_loss_min": min_val_batch_loss,
+                "val_batch_loss_max": max_val_batch_loss,
+                "val_batch_loss_std": std_val_batch_loss,
+                "val_batch_loss_avg": avg_val_loss,
+                # Performance metrics
                 "epoch_time": epoch_time,
+                "avg_batch_time": avg_batch_time,
+                "samples_per_sec": avg_samples_per_sec,
+                # Success rates
                 "train_success_rate": successful_batches / (successful_batches + failed_batches) if (successful_batches + failed_batches) > 0 else 0,
                 "val_success_rate": val_successful_batches / (val_successful_batches + val_failed_batches) if (val_successful_batches + val_failed_batches) > 0 else 0,
-                "avg_batch_time": avg_batch_time,
-                "samples_per_sec": avg_samples_per_sec
+                # Counts
+                "total_train_batches": successful_batches + failed_batches,
+                "total_val_batches": val_successful_batches + val_failed_batches,
+                "successful_train_batches": successful_batches,
+                "successful_val_batches": val_successful_batches,
+                # Evaluation metrics (computed on full validation set)
+                "val_mean_iou": eval_metrics['mean_iou'],
+                "val_precision": eval_metrics['precision'],
+                "val_recall": eval_metrics['recall'],
+                "val_f1_score": eval_metrics['f1_score'],
+                "val_true_positives": eval_metrics['true_positives'],
+                "val_false_positives": eval_metrics['false_positives'],
+                "val_false_negatives": eval_metrics['false_negatives']
             })
+        
+        # Track best model (based on validation IoU)
+        if eval_metrics['mean_iou'] > best_val_iou:
+            best_val_iou = eval_metrics['mean_iou']
+            best_epoch = epoch
+            best_model_state = model.state_dict()
+            console.print(f"[green]✨ New best model! IoU:[/green] {best_val_iou:.3f}")
+            logger.info(f"New best model at epoch {epoch+1} with IoU: {best_val_iou:.3f}")
+        
+        if wandb_api_key:
+            wandb.log({"best_val_iou": best_val_iou, "best_epoch_so_far": best_epoch})
         
         # Early stopping check (optional)
         if len(val_losses) > 3:
@@ -503,12 +744,15 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_save_path = os.path.join(model_save_dir, f'model_{timestamp}.pth')
     
-    # Save model state dict and additional training info
+    # Save final model state dict and additional training info
     save_dict = {
         'model_state_dict': model.state_dict(),
+        'best_model_state': best_model_state if best_model_state else model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'train_losses': train_losses,
         'val_losses': val_losses,
+        'best_val_iou': best_val_iou,
+        'best_epoch': best_epoch,
         'epoch': num_epochs,
         'learning_rate': learning_rate,
         'batch_size': batch_size,
@@ -516,6 +760,17 @@ def main():
     }
     
     torch.save(save_dict, model_save_path)
+    
+    # Also save best model separately if different from final model
+    if best_model_state and best_model_state != model.state_dict():
+        best_model_path = os.path.join(model_save_dir, f'best_model_iou{best_val_iou:.3f}_epoch{best_epoch+1}_{timestamp}.pth')
+        torch.save({
+            'model_state_dict': best_model_state,
+            'best_val_iou': best_val_iou,
+            'best_epoch': best_epoch
+        }, best_model_path)
+        console.print(f"[green]✅ Best model saved to:[/green] {best_model_path}")
+        logger.info(f"Best model saved to: {best_model_path}")
     console.print(f"[green]✅ Model saved to:[/green] {model_save_path}")
     logger.info(f"Model saved to: {model_save_path}")
     
@@ -631,6 +886,8 @@ def main():
             "final_val_loss": val_losses[-1],
             "best_train_loss": min(train_losses),
             "best_val_loss": min(val_losses),
+            "best_val_iou_final": best_val_iou,
+            "best_epoch_final": best_epoch,
             "total_training_time": total_time,
             "total_epochs": num_epochs
         })
