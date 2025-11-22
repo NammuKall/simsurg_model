@@ -762,7 +762,7 @@ def main():
     torch.save(save_dict, model_save_path)
     
     # Also save best model separately if different from final model
-    if best_model_state and best_model_state != model.state_dict():
+    if best_model_state and any(not torch.equal(best_model_state[k], model.state_dict()[k]) for k in best_model_state.keys()):
         best_model_path = os.path.join(model_save_dir, f'best_model_iou{best_val_iou:.3f}_epoch{best_epoch+1}_{timestamp}.pth')
         torch.save({
             'model_state_dict': best_model_state,
