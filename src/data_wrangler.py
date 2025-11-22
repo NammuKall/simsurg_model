@@ -200,7 +200,9 @@ class DataWrangler:
                     
                     for ann_id, ann in all_annotations.items():
                         # Only process annotations for frame_id == 1
-                        if ann.get('frame_id') == 1.0:
+                        # Use integer comparison to avoid floating point precision issues
+                        frame_id = ann.get('frame_id')
+                        if frame_id is not None and (frame_id == 1 or abs(frame_id - 1.0) < 0.001):
                             frame_1_found = True
                             if self.validate_annotation(ann, img_width, img_height):
                                 # Parse coordinates

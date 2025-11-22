@@ -1,5 +1,6 @@
 #evaluation_metrics.py
 
+import os
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -213,11 +214,9 @@ def calculate_metrics_at_threshold(predictions, ground_truths, conf_threshold, i
                         if pred_idx in matched_pred or pred_label != gt_label:
                             continue
                         
-                        # Convert boxes to xyxy format if needed
-                        gt_box_xyxy = convert_bbox_format(gt_box, 'coco', 'xyxy')
-                        pred_box_xyxy = convert_bbox_format(pred_box, 'coco', 'xyxy')
-                        
-                        iou = calculate_iou(gt_box_xyxy, pred_box_xyxy)
+                        # Boxes are already in xyxy format from coco_data_loader and model output
+                        # No conversion needed - use boxes directly
+                        iou = calculate_iou(gt_box, pred_box)
                         
                         if iou > best_iou:
                             best_iou = iou
