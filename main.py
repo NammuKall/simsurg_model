@@ -412,6 +412,9 @@ def main():
     best_val_iou = 0.0
     best_epoch = 0
     best_model_state = None
+    best_val_precision = 0.0
+    best_val_recall = 0.0
+    best_val_f1_score = 0.0
     
     console.print(Panel.fit(
         f"[bold green]STARTING TRAINING[/bold green]\n"
@@ -537,6 +540,9 @@ def main():
                                     "periodic_precision": eval_metrics['precision'],
                                     "periodic_recall": eval_metrics['recall'],
                                     "periodic_f1_score": eval_metrics['f1_score'],
+                                    "periodic_true_positives": eval_metrics['true_positives'],
+                                    "periodic_false_positives": eval_metrics['false_positives'],
+                                    "periodic_false_negatives": eval_metrics['false_negatives'],
                                     "periodic_batch": i + 1 + epoch * len(train_loader)
                                 })
                                 
@@ -720,11 +726,20 @@ def main():
             best_val_iou = eval_metrics['mean_iou']
             best_epoch = epoch
             best_model_state = model.state_dict()
+            best_val_precision = eval_metrics['precision']
+            best_val_recall = eval_metrics['recall']
+            best_val_f1_score = eval_metrics['f1_score']
             console.print(f"[green]✨ New best model! IoU:[/green] {best_val_iou:.3f}")
             logger.info(f"New best model at epoch {epoch+1} with IoU: {best_val_iou:.3f}")
         
         if wandb_api_key:
-            wandb.log({"best_val_iou": best_val_iou, "best_epoch_so_far": best_epoch})
+            wandb.log({
+                "best_val_iou": best_val_iou,
+                "best_epoch_so_far": best_epoch,
+                "best_val_precision": best_val_precision,
+                "best_val_recall": best_val_recall,
+                "best_val_f1_score": best_val_f1_score
+            })
         
         # Early stopping check (optional)
         if len(val_losses) > 3:
@@ -753,6 +768,9 @@ def main():
         'train_losses': train_losses,
         'val_losses': val_losses,
         'best_val_iou': best_val_iou,
+        'best_val_precision': best_val_precision,
+        'best_val_recall': best_val_recall,
+        'best_val_f1_score': best_val_f1_score,
         'best_epoch': best_epoch,
         'epoch': num_epochs,
         'learning_rate': learning_rate,
@@ -883,6 +901,10 @@ def main():
     
     # Log final metrics to W&B
     if wandb_api_key:
+        # Run final evaluation to get comprehensive metrics
+        model.eval()
+        final_eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None)
+        
         wandb.log({
             "final_train_loss": train_losses[-1],
             "final_val_loss": val_losses[-1],
@@ -890,8 +912,17 @@ def main():
             "best_val_loss": min(val_losses),
             "best_val_iou_final": best_val_iou,
             "best_epoch_final": best_epoch,
+            "final_val_iou": final_eval_metrics['mean_iou'],
+            "final_val_precision": final_eval_metrics['precision'],
+            "final_val_recall": final_eval_metrics['recall'],
+            "final_val_f1_score": final_eval_metrics['f1_score'],
+            "final_val_true_positives": final_eval_metrics['true_positives'],
+            "final_val_false_positives": final_eval_metrics['false_positives'],
+            "final_val_false_negatives": final_eval_metrics['false_negatives'],
             "total_training_time": total_time,
-            "total_epochs": num_epochs
+            "total_training_time_minutes": total_time / 60,
+            "total_epochs": num_epochs,
+            "avg_epoch_time": total_time / num_epochs if num_epochs > 0 else 0
         })
         wandb.finish()
         logger.info("W&B run finished")
