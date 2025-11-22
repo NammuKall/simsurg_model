@@ -61,16 +61,11 @@ class COCODataset(Dataset):
             if img['id'] == image_id:
                 image_info = img
                 break
-        
-        if image_info is None:
-            raise ValueError(f"Image ID {image_id} not found in COCO data")
                 
         # Load image
         img_name = image_info['file_name']
         img_path = os.path.join(self.root_dir, img_name)
         image = cv2.imread(img_path)
-        if image is None:
-            raise ValueError(f"Could not read image: {img_path}")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
         
         # Get annotations for this image
