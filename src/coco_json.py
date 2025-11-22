@@ -301,7 +301,7 @@ class COCOJSONGenerator:
                 avg_ann = n_annotations / n_images
                 logger.info(f"  Avg annotations/image: {avg_ann:.1f}")
                 if avg_ann < 2 or avg_ann > 5:
-                    logger.warning(f"  ⚠️  Expected ~3 annotations/image, got {avg_ann:.1f}")
+                    logger.warning(f"  âš ï¸  Expected ~3 annotations/image, got {avg_ann:.1f}")
             
             # Class distribution
             class_counts = {}
@@ -350,7 +350,7 @@ def main():
         val_ratio=args.val_ratio
     )
     
-    logger.info("\n✅ COCO format generation complete!")
+    logger.info("\nâœ… COCO format generation complete!")
     logger.info(f"Output directory: {coco_paths['output_dir']}")
     
     return coco_paths
