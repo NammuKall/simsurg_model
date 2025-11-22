@@ -225,7 +225,7 @@ def run_inference(model_path: str, coco_paths: Dict, output_dir: str = "inferenc
         "[bold blue]RUNNING INFERENCE[/bold blue]\n"
         f"Model: {model_path}\n"
         f"Output: {output_dir}",
-        title="🔍 Inference",
+        title="ðŸ” Inference",
         border_style="blue"
     ))
     
@@ -250,7 +250,7 @@ def run_inference(model_path: str, coco_paths: Dict, output_dir: str = "inferenc
         model.load_state_dict(checkpoint)
     
     model.eval()
-    console.print("[green]✅ Model loaded successfully[/green]")
+    console.print("[green]âœ… Model loaded successfully[/green]")
     
     # Get data loader
     _, _, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size)
@@ -363,7 +363,7 @@ def run_inference(model_path: str, coco_paths: Dict, output_dir: str = "inferenc
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
     
-    console.print(f"\n[green]✅ Results saved to:[/green] {results_file}")
+    console.print(f"\n[green]âœ… Results saved to:[/green] {results_file}")
     
     return results
 
