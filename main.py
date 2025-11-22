@@ -14,7 +14,6 @@ import logging
 import numpy as np
 import torch
 import torch.optim as optim
-from torch.cuda.amp import autocast, GradScaler
 import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
@@ -95,8 +94,7 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
     
     if len(all_predictions) == 0:
         return {
-            'mean_iou': 0.0, 'min_iou': 0.0, 'max_iou': 0.0, 'std_iou': 0.0,
-            'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
+            'mean_iou': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
             'true_positives': 0, 'false_positives': 0, 'false_negatives': 0
         }
     
@@ -153,9 +151,6 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
     
     # Calculate metrics
     mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else 0.0
-    min_iou = np.min(iou_scores) if len(iou_scores) > 0 else 0.0
-    max_iou = np.max(iou_scores) if len(iou_scores) > 0 else 0.0
-    std_iou = np.std(iou_scores) if len(iou_scores) > 0 else 0.0
     
     precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0.0
     recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0.0
@@ -163,9 +158,6 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
     
     return {
         'mean_iou': float(mean_iou),
-        'min_iou': float(min_iou),
-        'max_iou': float(max_iou),
-        'std_iou': float(std_iou),
         'precision': float(precision),
         'recall': float(recall),
         'f1_score': float(f1_score),
@@ -331,10 +323,7 @@ def main():
     logger.info("Creating data loaders")
     
     batch_size = int(os.getenv("BATCH_SIZE", "4"))
-    # Optimize num_workers for data loading (use 4-8 workers typically)
-    import multiprocessing
-    num_workers = min(8, max(4, multiprocessing.cpu_count() // 2))
-    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size, num_workers=num_workers)
+    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size)
     
     # Display data loader information
     data_info_table = Table(title="Data Loader Information")
@@ -391,14 +380,6 @@ def main():
     learning_rate = float(os.getenv("LEARNING_RATE", "0.001"))
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
-    # Initialize mixed precision training (AMP) for faster training on GPU
-    # This provides 1.5-2x speedup with no quality loss on modern GPUs
-    use_amp = torch.cuda.is_available() and os.getenv("USE_AMP", "true").lower() == "true"
-    scaler = GradScaler() if use_amp else None
-    if use_amp:
-        logger.info("Mixed precision training (AMP) enabled for faster training")
-        console.print("[green]✅ Mixed precision training enabled[/green]")
-    
     # Log model information
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -431,9 +412,6 @@ def main():
     best_val_iou = 0.0
     best_epoch = 0
     best_model_state = None
-    best_val_precision = 0.0
-    best_val_recall = 0.0
-    best_val_f1_score = 0.0
     
     console.print(Panel.fit(
         f"[bold green]STARTING TRAINING[/bold green]\n"
@@ -458,7 +436,6 @@ def main():
         successful_batches = 0
         failed_batches = 0
         batch_losses = []  # Track individual batch losses for detailed logging
-        grad_norms = []  # Track gradient norms for epoch-level statistics
         
         # Create progress bar for training
         with Progress(
@@ -474,26 +451,21 @@ def main():
             for i, (images, targets) in enumerate(train_loader):
                 batch_start_time = time.time()
                 try:
-                    # Move data to device (non_blocking=True for faster transfer with pin_memory)
-                    images = images.to(device, non_blocking=True)
+                    # Move data to device
+                    images = images.to(device)
                     
                     # Move targets to device
                     for j in range(len(targets)):
-                        targets[j]['boxes'] = targets[j]['boxes'].to(device, non_blocking=True)
-                        targets[j]['labels'] = targets[j]['labels'].to(device, non_blocking=True)
-                        targets[j]['image_id'] = targets[j]['image_id'].to(device, non_blocking=True)
+                        targets[j]['boxes'] = targets[j]['boxes'].to(device)
+                        targets[j]['labels'] = targets[j]['labels'].to(device)
+                        targets[j]['image_id'] = targets[j]['image_id'].to(device)
                     
-                    # Forward pass with mixed precision (AMP) if enabled
-                    optimizer.zero_grad()
-                    if use_amp:
-                        with autocast():
-                            outputs = model(images, targets)
-                            if isinstance(outputs, dict) and 'loss' in outputs:
-                                loss = outputs['loss']
-                            else:
-                                logger.warning(f"Unexpected output format at batch {i}: {type(outputs)}")
-                                failed_batches += 1
-                                continue
+                    # Forward pass
+                    outputs = model(images, targets)
+                    
+                    # Extract loss from output dictionary
+                    if isinstance(outputs, dict) and 'loss' in outputs:
+                        loss = outputs['loss']
                         
                         # Check for invalid loss values
                         if torch.isnan(loss) or torch.isinf(loss):
@@ -501,109 +473,82 @@ def main():
                             failed_batches += 1
                             continue
                         
-                        # Backward pass with gradient scaling for mixed precision
-                        scaler.scale(loss).backward()
-                    else:
-                        outputs = model(images, targets)
+                        # Backward and optimize
+                        optimizer.zero_grad()
+                        loss.backward()
                         
-                        # Extract loss from output dictionary
-                        if isinstance(outputs, dict) and 'loss' in outputs:
-                            loss = outputs['loss']
-                            
-                            # Check for invalid loss values
-                            if torch.isnan(loss) or torch.isinf(loss):
-                                logger.warning(f"Invalid loss value at batch {i}: {loss.item()}")
-                                failed_batches += 1
-                                continue
-                        else:
-                            logger.warning(f"Unexpected output format at batch {i}: {type(outputs)}")
+                        # Check for gradient issues
+                        grad_norm = 0.0
+                        for param in model.parameters():
+                            if param.grad is not None:
+                                grad_norm += param.grad.data.norm(2).item() ** 2
+                        grad_norm = grad_norm ** 0.5
+                        
+                        if torch.isnan(torch.tensor(grad_norm)) or torch.isinf(torch.tensor(grad_norm)):
+                            logger.warning(f"Invalid gradient norm at batch {i}: {grad_norm}")
                             failed_batches += 1
                             continue
                         
-                        # Standard backward pass
-                        loss.backward()
-                    
-                    # Check for gradient issues (common for both AMP and non-AMP)
-                    grad_norm = 0.0
-                    for param in model.parameters():
-                        if param.grad is not None:
-                            grad_norm += param.grad.data.norm(2).item() ** 2
-                    grad_norm = grad_norm ** 0.5
-                    
-                    # Check for invalid gradient norm (using numpy for scalar check)
-                    if np.isnan(grad_norm) or np.isinf(grad_norm):
-                        logger.warning(f"Invalid gradient norm at batch {i}: {grad_norm}")
+                        optimizer.step()
+                        
+                        loss_value = loss.item()
+                        train_loss += loss_value
+                        batch_losses.append(loss_value)
+                        num_batches += 1
+                        successful_batches += 1
+                        
+                        # Track batch performance
+                        batch_time = time.time() - batch_start_time
+                        batch_times.append(batch_time)
+                        samples_per_sec = batch_size / batch_time if batch_time > 0 else 0
+                        
+                        # Log to W&B (every 10 batches for detailed tracking)
+                        if wandb_api_key and i % 10 == 0:
+                            log_dict = {
+                                "batch_train_loss": loss.item(),
+                                "batch": i + epoch * len(train_loader),
+                                "grad_norm": grad_norm,
+                                "learning_rate": optimizer.param_groups[0]['lr'],
+                                "batch_time": batch_time,
+                                "samples_per_sec": samples_per_sec
+                            }
+                            
+                            # Add GPU memory usage if available
+                            if torch.cuda.is_available():
+                                log_dict["gpu_memory_allocated_mb"] = torch.cuda.memory_allocated(0) / 1024**2
+                                log_dict["gpu_memory_reserved_mb"] = torch.cuda.memory_reserved(0) / 1024**2
+                            
+                            wandb.log(log_dict)
+                        
+                        if (i + 1) % 10 == 0:
+                            logger.info(f'Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}, '
+                                       f'Grad Norm: {grad_norm:.4f}, Batch Time: {batch_time:.3f}s, '
+                                       f'Speed: {samples_per_sec:.1f} samples/sec')
+                        
+                        # Periodic quick evaluation every 100 batches
+                        if (i + 1) % 100 == 0 and wandb_api_key:
+                            logger.info(f"Running periodic evaluation at batch {i+1}")
+                            try:
+                                eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20)
+                                
+                                wandb.log({
+                                    "periodic_mean_iou": eval_metrics['mean_iou'],
+                                    "periodic_precision": eval_metrics['precision'],
+                                    "periodic_recall": eval_metrics['recall'],
+                                    "periodic_f1_score": eval_metrics['f1_score'],
+                                    "periodic_batch": i + 1 + epoch * len(train_loader)
+                                })
+                                
+                                logger.info(f"Periodic Eval - IoU: {eval_metrics['mean_iou']:.3f}, "
+                                           f"Precision: {eval_metrics['precision']:.3f}, "
+                                           f"Recall: {eval_metrics['recall']:.3f}, "
+                                           f"F1: {eval_metrics['f1_score']:.3f}")
+                            except Exception as e:
+                                logger.warning(f"Periodic evaluation failed: {e}")
+                    else:
+                        logger.warning(f"Unexpected output format at batch {i}: {type(outputs)}")
                         failed_batches += 1
                         continue
-                    
-                    # Optimizer step with gradient scaling for mixed precision
-                    if use_amp:
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        optimizer.step()
-                    
-                    loss_value = loss.item()
-                    train_loss += loss_value
-                    batch_losses.append(loss_value)
-                    grad_norms.append(grad_norm)
-                    num_batches += 1
-                    successful_batches += 1
-                    
-                    # Track batch performance
-                    batch_time = time.time() - batch_start_time
-                    batch_times.append(batch_time)
-                    samples_per_sec = batch_size / batch_time if batch_time > 0 else 0
-                    
-                    # Log to W&B (every 10 batches for detailed tracking)
-                    if wandb_api_key and i % 10 == 0:
-                        log_dict = {
-                            "batch_train_loss": loss.item(),
-                            "batch": i + epoch * len(train_loader),
-                            "grad_norm": grad_norm,
-                            "learning_rate": optimizer.param_groups[0]['lr'],
-                            "batch_time": batch_time,
-                            "samples_per_sec": samples_per_sec
-                        }
-                        
-                        # Add GPU memory usage if available
-                        if torch.cuda.is_available():
-                            log_dict["gpu_memory_allocated_mb"] = torch.cuda.memory_allocated(0) / 1024**2
-                            log_dict["gpu_memory_reserved_mb"] = torch.cuda.memory_reserved(0) / 1024**2
-                        
-                        wandb.log(log_dict)
-                    
-                    if (i + 1) % 10 == 0:
-                        logger.info(f'Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}, '
-                                   f'Grad Norm: {grad_norm:.4f}, Batch Time: {batch_time:.3f}s, '
-                                   f'Speed: {samples_per_sec:.1f} samples/sec')
-                    
-                    # Periodic quick evaluation every 100 batches (can be disabled via env var)
-                    if (i + 1) % 100 == 0 and wandb_api_key and os.getenv("ENABLE_PERIODIC_EVAL", "true").lower() == "true":
-                        logger.info(f"Running periodic evaluation at batch {i+1}")
-                        try:
-                            eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20)
-                            
-                            wandb.log({
-                                "periodic_mean_iou": eval_metrics['mean_iou'],
-                                "periodic_min_iou": eval_metrics['min_iou'],
-                                "periodic_max_iou": eval_metrics['max_iou'],
-                                "periodic_std_iou": eval_metrics['std_iou'],
-                                "periodic_precision": eval_metrics['precision'],
-                                "periodic_recall": eval_metrics['recall'],
-                                "periodic_f1_score": eval_metrics['f1_score'],
-                                "periodic_true_positives": eval_metrics['true_positives'],
-                                "periodic_false_positives": eval_metrics['false_positives'],
-                                "periodic_false_negatives": eval_metrics['false_negatives'],
-                                "periodic_batch": i + 1 + epoch * len(train_loader)
-                            })
-                            
-                            logger.info(f"Periodic Eval - IoU: {eval_metrics['mean_iou']:.3f}, "
-                                       f"Precision: {eval_metrics['precision']:.3f}, "
-                                       f"Recall: {eval_metrics['recall']:.3f}, "
-                                       f"F1: {eval_metrics['f1_score']:.3f}")
-                        except Exception as e:
-                            logger.warning(f"Periodic evaluation failed: {e}")
                         
                 except Exception as e:
                     logger.error(f"Error in training batch {i}: {e}")
@@ -626,12 +571,6 @@ def main():
         min_batch_loss = np.min(batch_losses) if batch_losses else 0
         max_batch_loss = np.max(batch_losses) if batch_losses else 0
         std_batch_loss = np.std(batch_losses) if batch_losses else 0
-        
-        # Compute gradient norm statistics
-        min_grad_norm = np.min(grad_norms) if grad_norms else 0
-        max_grad_norm = np.max(grad_norms) if grad_norms else 0
-        avg_grad_norm = np.mean(grad_norms) if grad_norms else 0
-        std_grad_norm = np.std(grad_norms) if grad_norms else 0
         
         # Log epoch training results with performance
         console.print(f"[green]📈 Training Loss:[/green] {avg_train_loss:.4f} | "
@@ -664,13 +603,13 @@ def main():
                 
                 for i, (images, targets) in enumerate(val_loader):
                     try:
-                        images = images.to(device, non_blocking=True)
+                        images = images.to(device)
                         
-                        # Move targets to device (non_blocking=True for faster transfer)
+                        # Move targets to device
                         for j in range(len(targets)):
-                            targets[j]['boxes'] = targets[j]['boxes'].to(device, non_blocking=True)
-                            targets[j]['labels'] = targets[j]['labels'].to(device, non_blocking=True)
-                            targets[j]['image_id'] = targets[j]['image_id'].to(device, non_blocking=True)
+                            targets[j]['boxes'] = targets[j]['boxes'].to(device)
+                            targets[j]['labels'] = targets[j]['labels'].to(device)
+                            targets[j]['image_id'] = targets[j]['image_id'].to(device)
                         
                         # Forward pass
                         outputs = model(images, targets)
@@ -753,13 +692,6 @@ def main():
                 "val_batch_loss_max": max_val_batch_loss,
                 "val_batch_loss_std": std_val_batch_loss,
                 "val_batch_loss_avg": avg_val_loss,
-                # Gradient norm statistics
-                "grad_norm_min": min_grad_norm,
-                "grad_norm_max": max_grad_norm,
-                "grad_norm_avg": avg_grad_norm,
-                "grad_norm_std": std_grad_norm,
-                # Learning rate
-                "learning_rate": optimizer.param_groups[0]['lr'],
                 # Performance metrics
                 "epoch_time": epoch_time,
                 "avg_batch_time": avg_batch_time,
@@ -772,13 +704,8 @@ def main():
                 "total_val_batches": val_successful_batches + val_failed_batches,
                 "successful_train_batches": successful_batches,
                 "successful_val_batches": val_successful_batches,
-                "failed_train_batches": failed_batches,
-                "failed_val_batches": val_failed_batches,
                 # Evaluation metrics (computed on full validation set)
                 "val_mean_iou": eval_metrics['mean_iou'],
-                "val_min_iou": eval_metrics['min_iou'],
-                "val_max_iou": eval_metrics['max_iou'],
-                "val_std_iou": eval_metrics['std_iou'],
                 "val_precision": eval_metrics['precision'],
                 "val_recall": eval_metrics['recall'],
                 "val_f1_score": eval_metrics['f1_score'],
@@ -792,20 +719,11 @@ def main():
             best_val_iou = eval_metrics['mean_iou']
             best_epoch = epoch
             best_model_state = model.state_dict()
-            best_val_precision = eval_metrics['precision']
-            best_val_recall = eval_metrics['recall']
-            best_val_f1_score = eval_metrics['f1_score']
             console.print(f"[green]✨ New best model! IoU:[/green] {best_val_iou:.3f}")
             logger.info(f"New best model at epoch {epoch+1} with IoU: {best_val_iou:.3f}")
         
         if wandb_api_key:
-            wandb.log({
-                "best_val_iou": best_val_iou,
-                "best_epoch_so_far": best_epoch,
-                "best_val_precision": best_val_precision,
-                "best_val_recall": best_val_recall,
-                "best_val_f1_score": best_val_f1_score
-            })
+            wandb.log({"best_val_iou": best_val_iou, "best_epoch_so_far": best_epoch})
         
         # Early stopping check (optional)
         if len(val_losses) > 3:
@@ -834,9 +752,6 @@ def main():
         'train_losses': train_losses,
         'val_losses': val_losses,
         'best_val_iou': best_val_iou,
-        'best_val_precision': best_val_precision,
-        'best_val_recall': best_val_recall,
-        'best_val_f1_score': best_val_f1_score,
         'best_epoch': best_epoch,
         'epoch': num_epochs,
         'learning_rate': learning_rate,
@@ -847,8 +762,7 @@ def main():
     torch.save(save_dict, model_save_path)
     
     # Also save best model separately if different from final model
-    # Check if best model is different by comparing epoch (more efficient than comparing state dicts)
-    if best_model_state and best_epoch < num_epochs - 1:
+    if best_model_state and best_model_state != model.state_dict():
         best_model_path = os.path.join(model_save_dir, f'best_model_iou{best_val_iou:.3f}_epoch{best_epoch+1}_{timestamp}.pth')
         torch.save({
             'model_state_dict': best_model_state,
@@ -967,10 +881,6 @@ def main():
     
     # Log final metrics to W&B
     if wandb_api_key:
-        # Run final evaluation to get comprehensive metrics
-        model.eval()
-        final_eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None)
-        
         wandb.log({
             "final_train_loss": train_losses[-1],
             "final_val_loss": val_losses[-1],
@@ -978,20 +888,8 @@ def main():
             "best_val_loss": min(val_losses),
             "best_val_iou_final": best_val_iou,
             "best_epoch_final": best_epoch,
-            "final_val_iou": final_eval_metrics['mean_iou'],
-            "final_val_min_iou": final_eval_metrics['min_iou'],
-            "final_val_max_iou": final_eval_metrics['max_iou'],
-            "final_val_std_iou": final_eval_metrics['std_iou'],
-            "final_val_precision": final_eval_metrics['precision'],
-            "final_val_recall": final_eval_metrics['recall'],
-            "final_val_f1_score": final_eval_metrics['f1_score'],
-            "final_val_true_positives": final_eval_metrics['true_positives'],
-            "final_val_false_positives": final_eval_metrics['false_positives'],
-            "final_val_false_negatives": final_eval_metrics['false_negatives'],
             "total_training_time": total_time,
-            "total_training_time_minutes": total_time / 60,
-            "total_epochs": num_epochs,
-            "avg_epoch_time": total_time / num_epochs if num_epochs > 0 else 0
+            "total_epochs": num_epochs
         })
         wandb.finish()
         logger.info("W&B run finished")
