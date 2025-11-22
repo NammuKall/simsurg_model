@@ -14,6 +14,7 @@ import logging
 import numpy as np
 import torch
 import torch.optim as optim
+from torch.cuda.amp import autocast, GradScaler
 import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
@@ -330,7 +331,10 @@ def main():
     logger.info("Creating data loaders")
     
     batch_size = int(os.getenv("BATCH_SIZE", "4"))
-    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size)
+    # Optimize num_workers for data loading (use 4-8 workers typically)
+    import multiprocessing
+    num_workers = min(8, max(4, multiprocessing.cpu_count() // 2))
+    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size, num_workers=num_workers)
     
     # Display data loader information
     data_info_table = Table(title="Data Loader Information")
@@ -386,6 +390,14 @@ def main():
     model = EfficientDetModel(num_classes=2).to(device)
     learning_rate = float(os.getenv("LEARNING_RATE", "0.001"))
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    
+    # Initialize mixed precision training (AMP) for faster training on GPU
+    # This provides 1.5-2x speedup with no quality loss on modern GPUs
+    use_amp = torch.cuda.is_available() and os.getenv("USE_AMP", "true").lower() == "true"
+    scaler = GradScaler() if use_amp else None
+    if use_amp:
+        logger.info("Mixed precision training (AMP) enabled for faster training")
+        console.print("[green]✅ Mixed precision training enabled[/green]")
     
     # Log model information
     total_params = sum(p.numel() for p in model.parameters())
@@ -462,21 +474,26 @@ def main():
             for i, (images, targets) in enumerate(train_loader):
                 batch_start_time = time.time()
                 try:
-                    # Move data to device
-                    images = images.to(device)
+                    # Move data to device (non_blocking=True for faster transfer with pin_memory)
+                    images = images.to(device, non_blocking=True)
                     
                     # Move targets to device
                     for j in range(len(targets)):
-                        targets[j]['boxes'] = targets[j]['boxes'].to(device)
-                        targets[j]['labels'] = targets[j]['labels'].to(device)
-                        targets[j]['image_id'] = targets[j]['image_id'].to(device)
+                        targets[j]['boxes'] = targets[j]['boxes'].to(device, non_blocking=True)
+                        targets[j]['labels'] = targets[j]['labels'].to(device, non_blocking=True)
+                        targets[j]['image_id'] = targets[j]['image_id'].to(device, non_blocking=True)
                     
-                    # Forward pass
-                    outputs = model(images, targets)
-                    
-                    # Extract loss from output dictionary
-                    if isinstance(outputs, dict) and 'loss' in outputs:
-                        loss = outputs['loss']
+                    # Forward pass with mixed precision (AMP) if enabled
+                    optimizer.zero_grad()
+                    if use_amp:
+                        with autocast():
+                            outputs = model(images, targets)
+                            if isinstance(outputs, dict) and 'loss' in outputs:
+                                loss = outputs['loss']
+                            else:
+                                logger.warning(f"Unexpected output format at batch {i}: {type(outputs)}")
+                                failed_batches += 1
+                                continue
                         
                         # Check for invalid loss values
                         if torch.isnan(loss) or torch.isinf(loss):
@@ -484,90 +501,109 @@ def main():
                             failed_batches += 1
                             continue
                         
-                        # Backward and optimize
-                        optimizer.zero_grad()
-                        loss.backward()
+                        # Backward pass with gradient scaling for mixed precision
+                        scaler.scale(loss).backward()
+                    else:
+                        outputs = model(images, targets)
                         
-                        # Check for gradient issues
-                        grad_norm = 0.0
-                        for param in model.parameters():
-                            if param.grad is not None:
-                                grad_norm += param.grad.data.norm(2).item() ** 2
-                        grad_norm = grad_norm ** 0.5
-                        
-                        # Check for invalid gradient norm (using numpy for scalar check)
-                        if np.isnan(grad_norm) or np.isinf(grad_norm):
-                            logger.warning(f"Invalid gradient norm at batch {i}: {grad_norm}")
+                        # Extract loss from output dictionary
+                        if isinstance(outputs, dict) and 'loss' in outputs:
+                            loss = outputs['loss']
+                            
+                            # Check for invalid loss values
+                            if torch.isnan(loss) or torch.isinf(loss):
+                                logger.warning(f"Invalid loss value at batch {i}: {loss.item()}")
+                                failed_batches += 1
+                                continue
+                        else:
+                            logger.warning(f"Unexpected output format at batch {i}: {type(outputs)}")
                             failed_batches += 1
                             continue
                         
-                        optimizer.step()
-                        
-                        loss_value = loss.item()
-                        train_loss += loss_value
-                        batch_losses.append(loss_value)
-                        grad_norms.append(grad_norm)
-                        num_batches += 1
-                        successful_batches += 1
-                        
-                        # Track batch performance
-                        batch_time = time.time() - batch_start_time
-                        batch_times.append(batch_time)
-                        samples_per_sec = batch_size / batch_time if batch_time > 0 else 0
-                        
-                        # Log to W&B (every 10 batches for detailed tracking)
-                        if wandb_api_key and i % 10 == 0:
-                            log_dict = {
-                                "batch_train_loss": loss.item(),
-                                "batch": i + epoch * len(train_loader),
-                                "grad_norm": grad_norm,
-                                "learning_rate": optimizer.param_groups[0]['lr'],
-                                "batch_time": batch_time,
-                                "samples_per_sec": samples_per_sec
-                            }
-                            
-                            # Add GPU memory usage if available
-                            if torch.cuda.is_available():
-                                log_dict["gpu_memory_allocated_mb"] = torch.cuda.memory_allocated(0) / 1024**2
-                                log_dict["gpu_memory_reserved_mb"] = torch.cuda.memory_reserved(0) / 1024**2
-                            
-                            wandb.log(log_dict)
-                        
-                        if (i + 1) % 10 == 0:
-                            logger.info(f'Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}, '
-                                       f'Grad Norm: {grad_norm:.4f}, Batch Time: {batch_time:.3f}s, '
-                                       f'Speed: {samples_per_sec:.1f} samples/sec')
-                        
-                        # Periodic quick evaluation every 100 batches (can be disabled via env var)
-                        if (i + 1) % 100 == 0 and wandb_api_key and os.getenv("ENABLE_PERIODIC_EVAL", "true").lower() == "true":
-                            logger.info(f"Running periodic evaluation at batch {i+1}")
-                            try:
-                                eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20)
-                                
-                                wandb.log({
-                                    "periodic_mean_iou": eval_metrics['mean_iou'],
-                                    "periodic_min_iou": eval_metrics['min_iou'],
-                                    "periodic_max_iou": eval_metrics['max_iou'],
-                                    "periodic_std_iou": eval_metrics['std_iou'],
-                                    "periodic_precision": eval_metrics['precision'],
-                                    "periodic_recall": eval_metrics['recall'],
-                                    "periodic_f1_score": eval_metrics['f1_score'],
-                                    "periodic_true_positives": eval_metrics['true_positives'],
-                                    "periodic_false_positives": eval_metrics['false_positives'],
-                                    "periodic_false_negatives": eval_metrics['false_negatives'],
-                                    "periodic_batch": i + 1 + epoch * len(train_loader)
-                                })
-                                
-                                logger.info(f"Periodic Eval - IoU: {eval_metrics['mean_iou']:.3f}, "
-                                           f"Precision: {eval_metrics['precision']:.3f}, "
-                                           f"Recall: {eval_metrics['recall']:.3f}, "
-                                           f"F1: {eval_metrics['f1_score']:.3f}")
-                            except Exception as e:
-                                logger.warning(f"Periodic evaluation failed: {e}")
-                    else:
-                        logger.warning(f"Unexpected output format at batch {i}: {type(outputs)}")
+                        # Standard backward pass
+                        loss.backward()
+                    
+                    # Check for gradient issues (common for both AMP and non-AMP)
+                    grad_norm = 0.0
+                    for param in model.parameters():
+                        if param.grad is not None:
+                            grad_norm += param.grad.data.norm(2).item() ** 2
+                    grad_norm = grad_norm ** 0.5
+                    
+                    # Check for invalid gradient norm (using numpy for scalar check)
+                    if np.isnan(grad_norm) or np.isinf(grad_norm):
+                        logger.warning(f"Invalid gradient norm at batch {i}: {grad_norm}")
                         failed_batches += 1
                         continue
+                    
+                    # Optimizer step with gradient scaling for mixed precision
+                    if use_amp:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    
+                    loss_value = loss.item()
+                    train_loss += loss_value
+                    batch_losses.append(loss_value)
+                    grad_norms.append(grad_norm)
+                    num_batches += 1
+                    successful_batches += 1
+                    
+                    # Track batch performance
+                    batch_time = time.time() - batch_start_time
+                    batch_times.append(batch_time)
+                    samples_per_sec = batch_size / batch_time if batch_time > 0 else 0
+                    
+                    # Log to W&B (every 10 batches for detailed tracking)
+                    if wandb_api_key and i % 10 == 0:
+                        log_dict = {
+                            "batch_train_loss": loss.item(),
+                            "batch": i + epoch * len(train_loader),
+                            "grad_norm": grad_norm,
+                            "learning_rate": optimizer.param_groups[0]['lr'],
+                            "batch_time": batch_time,
+                            "samples_per_sec": samples_per_sec
+                        }
+                        
+                        # Add GPU memory usage if available
+                        if torch.cuda.is_available():
+                            log_dict["gpu_memory_allocated_mb"] = torch.cuda.memory_allocated(0) / 1024**2
+                            log_dict["gpu_memory_reserved_mb"] = torch.cuda.memory_reserved(0) / 1024**2
+                        
+                        wandb.log(log_dict)
+                    
+                    if (i + 1) % 10 == 0:
+                        logger.info(f'Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}, '
+                                   f'Grad Norm: {grad_norm:.4f}, Batch Time: {batch_time:.3f}s, '
+                                   f'Speed: {samples_per_sec:.1f} samples/sec')
+                    
+                    # Periodic quick evaluation every 100 batches (can be disabled via env var)
+                    if (i + 1) % 100 == 0 and wandb_api_key and os.getenv("ENABLE_PERIODIC_EVAL", "true").lower() == "true":
+                        logger.info(f"Running periodic evaluation at batch {i+1}")
+                        try:
+                            eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20)
+                            
+                            wandb.log({
+                                "periodic_mean_iou": eval_metrics['mean_iou'],
+                                "periodic_min_iou": eval_metrics['min_iou'],
+                                "periodic_max_iou": eval_metrics['max_iou'],
+                                "periodic_std_iou": eval_metrics['std_iou'],
+                                "periodic_precision": eval_metrics['precision'],
+                                "periodic_recall": eval_metrics['recall'],
+                                "periodic_f1_score": eval_metrics['f1_score'],
+                                "periodic_true_positives": eval_metrics['true_positives'],
+                                "periodic_false_positives": eval_metrics['false_positives'],
+                                "periodic_false_negatives": eval_metrics['false_negatives'],
+                                "periodic_batch": i + 1 + epoch * len(train_loader)
+                            })
+                            
+                            logger.info(f"Periodic Eval - IoU: {eval_metrics['mean_iou']:.3f}, "
+                                       f"Precision: {eval_metrics['precision']:.3f}, "
+                                       f"Recall: {eval_metrics['recall']:.3f}, "
+                                       f"F1: {eval_metrics['f1_score']:.3f}")
+                        except Exception as e:
+                            logger.warning(f"Periodic evaluation failed: {e}")
                         
                 except Exception as e:
                     logger.error(f"Error in training batch {i}: {e}")
@@ -628,13 +664,13 @@ def main():
                 
                 for i, (images, targets) in enumerate(val_loader):
                     try:
-                        images = images.to(device)
+                        images = images.to(device, non_blocking=True)
                         
-                        # Move targets to device
+                        # Move targets to device (non_blocking=True for faster transfer)
                         for j in range(len(targets)):
-                            targets[j]['boxes'] = targets[j]['boxes'].to(device)
-                            targets[j]['labels'] = targets[j]['labels'].to(device)
-                            targets[j]['image_id'] = targets[j]['image_id'].to(device)
+                            targets[j]['boxes'] = targets[j]['boxes'].to(device, non_blocking=True)
+                            targets[j]['labels'] = targets[j]['labels'].to(device, non_blocking=True)
+                            targets[j]['image_id'] = targets[j]['image_id'].to(device, non_blocking=True)
                         
                         # Forward pass
                         outputs = model(images, targets)
