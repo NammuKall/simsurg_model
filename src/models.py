@@ -241,8 +241,10 @@ class EfficientDetModel(nn.Module):
             if len(gt_boxes) == 0:
                 continue
             
-            # Use up to num_gt objects
+            # Use up to num_gt objects (ensure we don't exceed available predictions)
             num_gt = min(len(gt_labels), class_logits.shape[1])
+            if num_gt == 0:
+                continue
             
             # Classification loss - Focal Loss for better training
             pred_logits = class_logits[i][:num_gt]
@@ -264,10 +266,11 @@ class EfficientDetModel(nn.Module):
             # Improved regression loss using smooth L1 (better than L1 for optimization)
             if len(gt_boxes) > 0:
                 num_boxes = min(len(gt_boxes), bbox_regression.shape[1])
-                pred_boxes = bbox_regression[i][:num_boxes]
-                gt_boxes_tensor = gt_boxes[:num_boxes]
-                
-                regression_loss += F.smooth_l1_loss(pred_boxes, gt_boxes_tensor.float(), beta=0.1)
+                if num_boxes > 0:
+                    pred_boxes = bbox_regression[i][:num_boxes]
+                    gt_boxes_tensor = gt_boxes[:num_boxes]
+                    
+                    regression_loss += F.smooth_l1_loss(pred_boxes, gt_boxes_tensor.float(), beta=0.1)
         
         # Combine losses with weighting
         total_loss = classification_loss + regression_loss * 0.5  # Weight regression loss

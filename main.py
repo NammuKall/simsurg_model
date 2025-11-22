@@ -484,7 +484,8 @@ def main():
                                 grad_norm += param.grad.data.norm(2).item() ** 2
                         grad_norm = grad_norm ** 0.5
                         
-                        if torch.isnan(torch.tensor(grad_norm)) or torch.isinf(torch.tensor(grad_norm)):
+                        # Check for invalid gradient norm (using numpy for scalar check)
+                        if np.isnan(grad_norm) or np.isinf(grad_norm):
                             logger.warning(f"Invalid gradient norm at batch {i}: {grad_norm}")
                             failed_batches += 1
                             continue
@@ -525,8 +526,8 @@ def main():
                                        f'Grad Norm: {grad_norm:.4f}, Batch Time: {batch_time:.3f}s, '
                                        f'Speed: {samples_per_sec:.1f} samples/sec')
                         
-                        # Periodic quick evaluation every 100 batches
-                        if (i + 1) % 100 == 0 and wandb_api_key:
+                        # Periodic quick evaluation every 100 batches (can be disabled via env var)
+                        if (i + 1) % 100 == 0 and wandb_api_key and os.getenv("ENABLE_PERIODIC_EVAL", "true").lower() == "true":
                             logger.info(f"Running periodic evaluation at batch {i+1}")
                             try:
                                 eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20)
@@ -762,7 +763,8 @@ def main():
     torch.save(save_dict, model_save_path)
     
     # Also save best model separately if different from final model
-    if best_model_state and best_model_state != model.state_dict():
+    # Check if best model is different by comparing epoch (more efficient than comparing state dicts)
+    if best_model_state and best_epoch < num_epochs - 1:
         best_model_path = os.path.join(model_save_dir, f'best_model_iou{best_val_iou:.3f}_epoch{best_epoch+1}_{timestamp}.pth')
         torch.save({
             'model_state_dict': best_model_state,

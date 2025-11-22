@@ -87,11 +87,21 @@ def evaluate_model(model, data_loader, device, confidence_thresholds=None, iou_t
             
             # Process each image in the batch
             for i in range(len(images)):
-                pred = predictions[i] if isinstance(predictions, list) else {
-                    'boxes': predictions['boxes'][i],
-                    'scores': predictions['scores'][i],
-                    'labels': predictions['labels'][i]
-                }
+                if isinstance(predictions, list):
+                    if i < len(predictions):
+                        pred = predictions[i]
+                    else:
+                        continue  # Skip if prediction not available
+                else:
+                    # Handle dict format (shouldn't happen with EfficientDetModel, but handle gracefully)
+                    if 'boxes' in predictions and i < len(predictions['boxes']):
+                        pred = {
+                            'boxes': predictions['boxes'][i],
+                            'scores': predictions['scores'][i] if 'scores' in predictions else torch.zeros(len(predictions['boxes'][i])),
+                            'labels': predictions['labels'][i] if 'labels' in predictions else torch.zeros(len(predictions['boxes'][i]), dtype=torch.long)
+                        }
+                    else:
+                        continue  # Skip if prediction not available
                 
                 # Store predictions
                 pred_data = {
