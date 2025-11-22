@@ -4,6 +4,7 @@
 # -*- coding: utf-8 -*-
 """
 Neural network model definitions for the SimSurgSkill dataset
+FIXED: Proper box coordinate handling and reduced false positives
 """
 
 import torch
@@ -103,8 +104,10 @@ class ResNet(nn.Module):
 
 class EfficientDetModel(nn.Module):
     """
-    Simplified EfficientDet-style model for object detection
-    Fixed to handle tensor size mismatches
+    FIXED EfficientDet-style model for object detection
+    - Proper coordinate handling
+    - Reduced false positives through better initialization
+    - Consistent box format throughout
     """
     
     def __init__(self, num_classes=2, num_anchors=9):
@@ -140,7 +143,7 @@ class EfficientDetModel(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # Detection heads
+        # Detection heads with better initialization
         self.class_head = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -156,6 +159,31 @@ class EfficientDetModel(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(256, num_anchors * 4, kernel_size=3, padding=1)
         )
+        
+        # CRITICAL FIX: Initialize final layers to reduce initial false positives
+        self._initialize_detection_heads()
+    
+    def _initialize_detection_heads(self):
+        """
+        Initialize detection heads to reduce false positives
+        - Classification: bias toward background (negative logits)
+        - Box regression: bias toward center of image with small boxes
+        """
+        # Initialize classification head final layer with negative bias
+        # This makes the model initially predict background (lower confidence)
+        for module in self.class_head.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.normal_(module.weight, std=0.01)
+                if module.bias is not None:
+                    # Negative bias = lower initial confidence
+                    nn.init.constant_(module.bias, -4.0)
+        
+        # Initialize box head final layer
+        for module in self.box_head.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.normal_(module.weight, std=0.01)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
 
     def forward(self, x, targets=None):
         """
@@ -171,13 +199,16 @@ class EfficientDetModel(nn.Module):
         """
         batch_size = x.shape[0]
         
-        # Extract features from backbone
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
+        # CRITICAL FIX: Store original input image dimensions
+        _, _, original_height, original_width = x.shape
         
-        c2 = self.layer1(x)   # stride 4
+        # Extract features from backbone
+        x_backbone = self.conv1(x)
+        x_backbone = self.bn1(x_backbone)
+        x_backbone = self.relu(x_backbone)
+        x_backbone = self.maxpool(x_backbone)
+        
+        c2 = self.layer1(x_backbone)   # stride 4
         c3 = self.layer2(c2)  # stride 8
         c4 = self.layer3(c3)  # stride 16
         c5 = self.layer4(c4)  # stride 32
@@ -199,9 +230,6 @@ class EfficientDetModel(nn.Module):
         bbox_regression = self.box_head(fused_features)
         
         # Reshape outputs
-        # class_logits: [B, num_anchors * num_classes, H, W] -> [B, H*W*num_anchors, num_classes]
-        # bbox_regression: [B, num_anchors * 4, H, W] -> [B, H*W*num_anchors, 4]
-        
         B, _, H, W = class_logits.shape
         
         class_logits = class_logits.permute(0, 2, 3, 1).contiguous()
@@ -211,14 +239,20 @@ class EfficientDetModel(nn.Module):
         bbox_regression = bbox_regression.view(B, -1, 4)
         
         if targets is not None:
-            # Compute loss when targets are provided (training or validation)
-            loss = self.compute_loss(class_logits, bbox_regression, targets)
+            # FIXED: Use original image dimensions for loss computation
+            loss = self.compute_loss(
+                class_logits, bbox_regression, targets, 
+                image_size=(original_height, original_width)
+            )
             return {'loss': loss}
         else:
-            # Inference mode: return predictions
-            return self.postprocess_predictions(class_logits, bbox_regression)
+            # FIXED: Use original image dimensions for postprocessing
+            return self.postprocess_predictions(
+                class_logits, bbox_regression,
+                image_size=(original_height, original_width)
+            )
     
-    def compute_loss(self, class_logits, bbox_regression, targets):
+    def compute_loss(self, class_logits, bbox_regression, targets, image_size=(720, 1280)):
         """
         Compute improved detection loss with IoU-based regression
         
@@ -226,9 +260,11 @@ class EfficientDetModel(nn.Module):
             class_logits: [B, num_predictions, num_classes]
             bbox_regression: [B, num_predictions, 4]
             targets: List of target dicts with 'boxes' and 'labels'
+            image_size: (height, width) of INPUT images for box normalization
         """
         device = class_logits.device
         batch_size = class_logits.shape[0]
+        img_height, img_width = image_size
         
         classification_loss = torch.tensor(0.0, device=device)
         regression_loss = torch.tensor(0.0, device=device)
@@ -241,7 +277,7 @@ class EfficientDetModel(nn.Module):
             if len(gt_boxes) == 0:
                 continue
             
-            # Use up to num_gt objects (ensure we don't exceed available predictions)
+            # Use up to num_gt objects
             num_gt = min(len(gt_labels), class_logits.shape[1])
             if num_gt == 0:
                 continue
@@ -256,35 +292,54 @@ class EfficientDetModel(nn.Module):
             # Use reduced target labels where applicable
             valid_targets = target_labels < self.num_classes
             if valid_targets.sum() > 0:
-                # Smoothed cross entropy for better training stability
                 classification_loss += F.cross_entropy(
                     pred_logits[valid_targets], 
                     target_labels[valid_targets],
                     reduction='mean'
                 )
             
-            # Improved regression loss using smooth L1 (better than L1 for optimization)
+            # Improved regression loss
             if len(gt_boxes) > 0:
                 num_boxes = min(len(gt_boxes), bbox_regression.shape[1])
                 if num_boxes > 0:
                     pred_boxes = bbox_regression[i][:num_boxes]
-                    gt_boxes_tensor = gt_boxes[:num_boxes]
+                    gt_boxes_tensor = gt_boxes[:num_boxes].float()
                     
-                    regression_loss += F.smooth_l1_loss(pred_boxes, gt_boxes_tensor.float(), beta=0.1)
+                    # Normalize boxes to [0, 1] range using INPUT image dimensions
+                    normalized_gt = gt_boxes_tensor.clone()
+                    normalized_gt[:, [0, 2]] = normalized_gt[:, [0, 2]] / img_width
+                    normalized_gt[:, [1, 3]] = normalized_gt[:, [1, 3]] / img_height
+                    
+                    # Apply sigmoid to predictions
+                    normalized_pred = torch.sigmoid(pred_boxes)
+                    
+                    # Use smooth L1 loss
+                    regression_loss += F.smooth_l1_loss(normalized_pred, normalized_gt, beta=0.1)
         
         # Combine losses with weighting
-        total_loss = classification_loss + regression_loss * 0.5  # Weight regression loss
+        total_loss = classification_loss + regression_loss * 0.5
         
         return total_loss
     
-    def postprocess_predictions(self, class_logits, bbox_regression, score_threshold=0.5):
+    def postprocess_predictions(self, class_logits, bbox_regression, 
+                                score_threshold=0.7, nms_threshold=0.5, 
+                                max_detections=100, image_size=(720, 1280)):
         """
-        Convert raw predictions to final detections
+        FIXED: Convert raw predictions to final detections with proper thresholding
+        
+        Args:
+            class_logits: [B, num_predictions, num_classes]
+            bbox_regression: [B, num_predictions, 4] (normalized [0, 1])
+            score_threshold: Minimum confidence score (INCREASED from 0.5 to 0.7)
+            nms_threshold: NMS IoU threshold
+            max_detections: Maximum number of detections per image
+            image_size: (height, width) of INPUT images for denormalization
         
         Returns:
             List of dicts with 'boxes', 'scores', 'labels' for each image in batch
         """
         batch_size = class_logits.shape[0]
+        img_height, img_width = image_size
         results = []
         
         for i in range(batch_size):
@@ -292,20 +347,110 @@ class EfficientDetModel(nn.Module):
             scores = torch.softmax(class_logits[i], dim=-1)
             max_scores, labels = scores.max(dim=-1)
             
-            # Filter by score threshold
+            # CRITICAL FIX 1: Use higher threshold to reduce false positives
             keep = max_scores > score_threshold
             
-            filtered_boxes = bbox_regression[i][keep]
+            # CRITICAL FIX 2: Limit to top-k predictions before NMS
+            if keep.sum() > max_detections * 5:  # Keep 5x max for NMS
+                top_k_scores, top_k_indices = torch.topk(max_scores[keep], k=max_detections * 5)
+                keep_indices = torch.where(keep)[0][top_k_indices]
+                keep = torch.zeros_like(keep, dtype=torch.bool)
+                keep[keep_indices] = True
+            
+            if keep.sum() == 0:
+                # No detections
+                results.append({
+                    'boxes': torch.zeros((0, 4), device=class_logits.device),
+                    'scores': torch.zeros(0, device=class_logits.device),
+                    'labels': torch.zeros(0, dtype=torch.long, device=class_logits.device)
+                })
+                continue
+            
+            # Get normalized boxes and apply sigmoid
+            normalized_boxes = torch.sigmoid(bbox_regression[i][keep])
+            
+            # Denormalize boxes back to pixel coordinates using INPUT image size
+            denormalized_boxes = normalized_boxes.clone()
+            denormalized_boxes[:, [0, 2]] = denormalized_boxes[:, [0, 2]] * img_width
+            denormalized_boxes[:, [1, 3]] = denormalized_boxes[:, [1, 3]] * img_height
+            
             filtered_scores = max_scores[keep]
             filtered_labels = labels[keep] + 1  # Convert back to 1-indexed
             
+            # CRITICAL FIX 3: Apply NMS to remove overlapping detections
+            final_boxes, final_scores, final_labels = self._apply_nms(
+                denormalized_boxes, filtered_scores, filtered_labels,
+                nms_threshold, max_detections
+            )
+            
             results.append({
-                'boxes': filtered_boxes,
-                'scores': filtered_scores,
-                'labels': filtered_labels
+                'boxes': final_boxes,
+                'scores': final_scores,
+                'labels': final_labels
             })
         
         return results
+    
+    def _apply_nms(self, boxes, scores, labels, nms_threshold=0.5, max_detections=100):
+        """
+        Apply Non-Maximum Suppression to remove overlapping boxes
+        
+        Args:
+            boxes: [N, 4] boxes in xyxy format
+            scores: [N] confidence scores
+            labels: [N] class labels
+            nms_threshold: IoU threshold for NMS
+            max_detections: Maximum detections to keep
+        
+        Returns:
+            Filtered boxes, scores, labels
+        """
+        if len(boxes) == 0:
+            return boxes, scores, labels
+        
+        # Apply NMS per class
+        keep_boxes = []
+        keep_scores = []
+        keep_labels = []
+        
+        unique_labels = labels.unique()
+        
+        for label in unique_labels:
+            mask = labels == label
+            class_boxes = boxes[mask]
+            class_scores = scores[mask]
+            class_labels = labels[mask]
+            
+            # Apply torchvision NMS
+            from torchvision.ops import nms
+            keep_indices = nms(class_boxes, class_scores, nms_threshold)
+            
+            # Limit to max detections per class
+            if len(keep_indices) > max_detections:
+                keep_indices = keep_indices[:max_detections]
+            
+            keep_boxes.append(class_boxes[keep_indices])
+            keep_scores.append(class_scores[keep_indices])
+            keep_labels.append(class_labels[keep_indices])
+        
+        if len(keep_boxes) == 0:
+            return (torch.zeros((0, 4), device=boxes.device),
+                    torch.zeros(0, device=scores.device),
+                    torch.zeros(0, dtype=torch.long, device=labels.device))
+        
+        # Concatenate all kept detections
+        final_boxes = torch.cat(keep_boxes, dim=0)
+        final_scores = torch.cat(keep_scores, dim=0)
+        final_labels = torch.cat(keep_labels, dim=0)
+        
+        # Sort by score and limit total detections
+        if len(final_boxes) > max_detections:
+            top_k_scores, top_k_indices = torch.topk(final_scores, k=max_detections)
+            final_boxes = final_boxes[top_k_indices]
+            final_scores = final_scores[top_k_indices]
+            final_labels = final_labels[top_k_indices]
+        
+        return final_boxes, final_scores, final_labels
 
 
 # Convenience function to create model
