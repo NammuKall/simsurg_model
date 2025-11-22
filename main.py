@@ -15,8 +15,6 @@ import numpy as np
 import torch
 import torch.optim as optim
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import seaborn as sns
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -27,9 +25,6 @@ from rich.logging import RichHandler
 from rich.table import Table
 from rich.panel import Panel
 import colorlog
-from collections import defaultdict
-from sklearn.metrics import confusion_matrix
-import subprocess
 
 # Load environment variables
 load_dotenv()
@@ -43,7 +38,7 @@ from src.utils import IOU
 console = Console()
 
 
-def compute_detection_metrics(model, data_loader, device, num_samples=None, return_samples=False):
+def compute_detection_metrics(model, data_loader, device, num_samples=None):
     """
     Compute detection metrics (IoU, precision, recall, mAP) on validation set
     
@@ -52,20 +47,15 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None, retu
         data_loader: Data loader for validation set
         device: Torch device
         num_samples: Number of samples to evaluate (None = all samples)
-        return_samples: If True, return sample images and predictions for visualization
     
     Returns:
-        dict: Dictionary of metrics including mAP at different IoU thresholds
+        dict: Dictionary of metrics
     """
     model.eval()
     
     all_predictions = []
     all_targets = []
-    sample_images = []  # Store images for visualization
     sample_count = 0
-    predictions_per_image = []  # Track number of predictions per image
-    all_precision_recall_pairs = []  # For P-R curve
-    confusion_matrix_data = {'pred_labels': [], 'gt_labels': []}  # For confusion matrix
     
     with torch.no_grad():
         for batch_idx, (images, targets) in enumerate(data_loader):
@@ -100,185 +90,15 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None, retu
                         'boxes': val_targets[i]['boxes'].cpu(),
                         'labels': val_targets[i]['labels'].cpu()
                     })
-                    
-                    # Store sample images for visualization (first few samples)
-                    if return_samples and len(sample_images) < 6:
-                        sample_images.append({
-                            'image': images[i].cpu(),
-                            'pred': pred,
-                            'target': val_targets[i]
-                        })
-                    
-                    # Track predictions per image
-                    predictions_per_image.append(len(pred['boxes']))
-                    
                     sample_count += 1
     
     if len(all_predictions) == 0:
         return {
             'mean_iou': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
-            'true_positives': 0, 'false_positives': 0, 'false_negatives': 0,
-            'map': 0.0, 'map_50': 0.0, 'map_75': 0.0,
-            'predictions_per_image': [],
-            'sample_images': []
+            'true_positives': 0, 'false_positives': 0, 'false_negatives': 0
         }
     
-    # Compute metrics at different IoU thresholds for mAP
-    iou_thresholds = [0.5, 0.75]
-    map_results = {}
-    
-    # Compute precision-recall pairs and confusion matrix at IoU 0.5 (for visualizations)
-    all_scores = []
-    all_is_tp = []
-    total_gt_count = sum(len(t['boxes']) for t in all_targets)
-    
-    for pred, target in zip(all_predictions, all_targets):
-        pred_boxes = pred['boxes']
-        pred_scores = pred['scores']
-        pred_labels = pred['labels']
-        
-        gt_boxes = target['boxes']
-        gt_labels = target['labels']
-        
-        # Sort predictions by confidence
-        if len(pred_scores) > 0:
-            sorted_indices = torch.argsort(pred_scores, descending=True)
-            pred_boxes = pred_boxes[sorted_indices]
-            pred_scores = pred_scores[sorted_indices]
-            pred_labels = pred_labels[sorted_indices]
-        
-        if len(gt_boxes) == 0:
-            all_scores.extend(pred_scores.tolist())
-            all_is_tp.extend([False] * len(pred_boxes))
-            for label in pred_labels:
-                confusion_matrix_data['pred_labels'].append(label.item())
-                confusion_matrix_data['gt_labels'].append(0)  # Background class
-            continue
-        
-        # Match predictions to ground truths at IoU 0.5
-        matched_gts = set()
-        matched_preds = set()
-        
-        for gt_idx, (gt_box, gt_label) in enumerate(zip(gt_boxes, gt_labels)):
-            best_iou = 0.0
-            best_pred_idx = -1
-            
-            for pred_idx, (pred_box, pred_label) in enumerate(zip(pred_boxes, pred_labels)):
-                if pred_idx in matched_preds:
-                    continue
-                
-                if pred_label != gt_label:
-                    continue
-                
-                iou = IOU(pred_box.numpy(), gt_box.numpy())
-                
-                if iou > best_iou:
-                    best_iou = iou
-                    best_pred_idx = pred_idx
-            
-            if best_iou >= 0.5 and best_pred_idx >= 0:
-                matched_gts.add(gt_idx)
-                matched_preds.add(best_pred_idx)
-                all_scores.append(pred_scores[best_pred_idx].item())
-                all_is_tp.append(True)
-                confusion_matrix_data['pred_labels'].append(pred_labels[best_pred_idx].item())
-                confusion_matrix_data['gt_labels'].append(gt_label.item())
-        
-        # Unmatched predictions are false positives
-        for pred_idx in range(len(pred_boxes)):
-            if pred_idx not in matched_preds:
-                all_scores.append(pred_scores[pred_idx].item())
-                all_is_tp.append(False)
-                confusion_matrix_data['pred_labels'].append(pred_labels[pred_idx].item())
-                confusion_matrix_data['gt_labels'].append(0)  # Background class
-        
-        # Unmatched ground truths are false negatives (for confusion matrix)
-        for gt_idx, gt_label in enumerate(gt_labels):
-            if gt_idx not in matched_gts:
-                confusion_matrix_data['pred_labels'].append(0)  # No prediction
-                confusion_matrix_data['gt_labels'].append(gt_label.item())
-    
-    # Calculate precision-recall pairs for P-R curve (sorted by confidence)
-    if len(all_scores) > 0:
-        sorted_indices = np.argsort(all_scores)[::-1]  # Sort descending by confidence
-        sorted_scores = np.array(all_scores)[sorted_indices]
-        sorted_is_tp = np.array(all_is_tp)[sorted_indices]
-        
-        for i in range(len(sorted_scores)):
-            current_tp = np.sum(sorted_is_tp[:i+1])
-            current_fp = (i + 1) - current_tp
-            current_fn = total_gt_count - current_tp
-            prec = current_tp / (current_tp + current_fp) if (current_tp + current_fp) > 0 else 0.0
-            rec = current_tp / (current_tp + current_fn) if (current_tp + current_fn) > 0 else 0.0
-            all_precision_recall_pairs.append((prec, rec))
-    
-    # Compute mAP at different IoU thresholds
-    for iou_thresh in iou_thresholds:
-        true_positives = 0
-        false_positives = 0
-        false_negatives = 0
-        
-        for pred, target in zip(all_predictions, all_targets):
-            pred_boxes = pred['boxes']
-            pred_scores = pred['scores']
-            pred_labels = pred['labels']
-            
-            gt_boxes = target['boxes']
-            gt_labels = target['labels']
-            
-            if len(gt_boxes) == 0:
-                false_positives += len(pred_boxes)
-                continue
-            
-            matched_gts = set()
-            matched_preds = set()
-            
-            for gt_idx, (gt_box, gt_label) in enumerate(zip(gt_boxes, gt_labels)):
-                best_iou = 0.0
-                best_pred_idx = -1
-                
-                for pred_idx, (pred_box, pred_label) in enumerate(zip(pred_boxes, pred_labels)):
-                    if pred_idx in matched_preds:
-                        continue
-                    
-                    if pred_label != gt_label:
-                        continue
-                    
-                    iou = IOU(pred_box.numpy(), gt_box.numpy())
-                    
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_pred_idx = pred_idx
-                
-                if best_iou >= iou_thresh and best_pred_idx >= 0:
-                    true_positives += 1
-                    matched_gts.add(gt_idx)
-                    matched_preds.add(best_pred_idx)
-                else:
-                    false_negatives += 1
-            
-            false_positives += len(pred_boxes) - len(matched_preds)
-        
-        # Calculate Average Precision (simplified)
-        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0.0
-        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0.0
-        
-        # Use precision-recall curve for AP if available, otherwise use simple precision*recall
-        if len(all_precision_recall_pairs) > 1:
-            sorted_pr = sorted(all_precision_recall_pairs, key=lambda x: x[1])
-            ap = np.trapz([p[0] for p in sorted_pr], [p[1] for p in sorted_pr])
-        else:
-            ap = precision * recall
-        
-        if iou_thresh == 0.5:
-            map_results['map_50'] = float(ap)
-        elif iou_thresh == 0.75:
-            map_results['map_75'] = float(ap)
-    
-    # Calculate overall mAP (average of mAP@0.5 and mAP@0.75)
-    map_results['map'] = float((map_results.get('map_50', 0.0) + map_results.get('map_75', 0.0)) / 2.0)
-    
-    # Calculate final metrics at IoU 0.5 (for compatibility)
+    # Compute metrics
     true_positives = 0
     false_positives = 0
     false_negatives = 0
@@ -336,175 +156,15 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None, retu
     recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0.0
     f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
     
-    result = {
+    return {
         'mean_iou': float(mean_iou),
         'precision': float(precision),
         'recall': float(recall),
         'f1_score': float(f1_score),
         'true_positives': int(true_positives),
         'false_positives': int(false_positives),
-        'false_negatives': int(false_negatives),
-        'map': map_results['map'],
-        'map_50': map_results['map_50'],
-        'map_75': map_results['map_75'],
-        'predictions_per_image': predictions_per_image,
-        'precision_recall_pairs': all_precision_recall_pairs,
-        'confusion_matrix_data': confusion_matrix_data
+        'false_negatives': int(false_negatives)
     }
-    
-    if return_samples:
-        result['sample_images'] = sample_images
-    
-    return result
-
-
-def create_sample_predictions_grid(sample_images, num_samples=6):
-    """Create a grid of sample predictions for visualization"""
-    if not sample_images or len(sample_images) == 0:
-        return None
-    
-    num_samples = min(num_samples, len(sample_images))
-    cols = 3
-    rows = (num_samples + cols - 1) // cols
-    
-    fig, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows))
-    if rows == 1:
-        axes = axes.reshape(1, -1)
-    axes = axes.flatten()
-    
-    for idx in range(num_samples):
-        sample = sample_images[idx]
-        image = sample['image']
-        pred = sample['pred']
-        target = sample['target']
-        
-        # Convert image to numpy
-        img = image.permute(1, 2, 0).detach().cpu().numpy()
-        img = np.clip(img, 0, 1)
-        
-        ax = axes[idx]
-        ax.imshow(img)
-        ax.axis('off')
-        ax.set_title(f'Sample {idx+1}', fontsize=10)
-        
-        # Draw ground truth boxes (green)
-        gt_boxes = target['boxes'].cpu() if isinstance(target['boxes'], torch.Tensor) else target['boxes']
-        for box in gt_boxes:
-            x1, y1, x2, y2 = box.numpy() if isinstance(box, torch.Tensor) else box
-            width = x2 - x1
-            height = y2 - y1
-            rect = patches.Rectangle((x1, y1), width, height,
-                                   linewidth=2, edgecolor='green',
-                                   facecolor='none', label='GT' if idx == 0 else '')
-            ax.add_patch(rect)
-        
-        # Draw predicted boxes (red)
-        pred_boxes = pred['boxes'].cpu() if isinstance(pred['boxes'], torch.Tensor) else pred['boxes']
-        pred_scores = pred['scores'].cpu() if isinstance(pred['scores'], torch.Tensor) else pred['scores']
-        for i, (box, score) in enumerate(zip(pred_boxes, pred_scores)):
-            x1, y1, x2, y2 = box.numpy() if isinstance(box, torch.Tensor) else box
-            width = x2 - x1
-            height = y2 - y1
-            rect = patches.Rectangle((x1, y1), width, height,
-                                   linewidth=2, edgecolor='red',
-                                   facecolor='none', linestyle='--',
-                                   alpha=0.7, label='Pred' if idx == 0 and i == 0 else '')
-            ax.add_patch(rect)
-            if score.item() > 0.5:  # Only show text for high confidence
-                ax.text(x1, y1 - 5, f'{score.item():.2f}',
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
-                       fontsize=8, color='red')
-    
-    # Hide unused subplots
-    for idx in range(num_samples, len(axes)):
-        axes[idx].axis('off')
-    
-    plt.tight_layout()
-    return fig
-
-
-def create_precision_recall_curve(pr_pairs):
-    """Create Precision-Recall curve"""
-    if not pr_pairs or len(pr_pairs) == 0:
-        return None
-    
-    precisions = [p[0] for p in pr_pairs]
-    recalls = [p[1] for p in pr_pairs]
-    
-    # Sort by recall for proper curve
-    sorted_data = sorted(zip(recalls, precisions), key=lambda x: x[0])
-    recalls_sorted, precisions_sorted = zip(*sorted_data) if sorted_data else ([], [])
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(recalls_sorted, precisions_sorted, 'b-', linewidth=2, label='Precision-Recall')
-    ax.set_xlabel('Recall', fontsize=12)
-    ax.set_ylabel('Precision', fontsize=12)
-    ax.set_title('Precision-Recall Curve', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim([0, 1])
-    ax.set_ylim([0, 1])
-    ax.legend()
-    plt.tight_layout()
-    return fig
-
-
-def create_confusion_matrix(confusion_data, class_names=None):
-    """Create confusion matrix visualization"""
-    if not confusion_data or len(confusion_data['pred_labels']) == 0:
-        return None
-    
-    pred_labels = confusion_data['pred_labels']
-    gt_labels = confusion_data['gt_labels']
-    
-    # Get unique classes
-    all_labels = sorted(set(pred_labels + gt_labels))
-    if class_names is None:
-        class_names = [f'Class {i}' for i in all_labels]
-    
-    # Create confusion matrix
-    cm = confusion_matrix(gt_labels, pred_labels, labels=all_labels)
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax,
-                xticklabels=class_names, yticklabels=class_names)
-    ax.set_xlabel('Predicted', fontsize=12)
-    ax.set_ylabel('Ground Truth', fontsize=12)
-    ax.set_title('Confusion Matrix', fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    return fig
-
-
-def create_predictions_per_image_histogram(predictions_per_image):
-    """Create histogram of predictions per image"""
-    if not predictions_per_image or len(predictions_per_image) == 0:
-        return None
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.hist(predictions_per_image, bins=min(20, max(5, len(set(predictions_per_image)))),
-           edgecolor='black', alpha=0.7)
-    ax.set_xlabel('Number of Predictions per Image', fontsize=12)
-    ax.set_ylabel('Frequency', fontsize=12)
-    ax.set_title('Distribution of Predictions per Image', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
-    plt.tight_layout()
-    return fig
-
-
-def get_gpu_utilization():
-    """Get GPU utilization percentage if available"""
-    if not torch.cuda.is_available():
-        return None
-    
-    try:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'],
-                               capture_output=True, text=True, timeout=2)
-        if result.returncode == 0:
-            return float(result.stdout.strip().split('\n')[0])
-    except:
-        pass
-    
-    return None
-
 
 # Configure enhanced logging
 def setup_logging(log_level=logging.INFO):
@@ -663,9 +323,7 @@ def main():
     logger.info("Creating data loaders")
     
     batch_size = int(os.getenv("BATCH_SIZE", "4"))
-    num_workers = int(os.getenv("NUM_WORKERS", "2"))
-    logger.info(f"DataLoader configuration: batch_size={batch_size}, num_workers={num_workers}")
-    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size, num_workers=num_workers)
+    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size)
     
     # Display data loader information
     data_info_table = Table(title="Data Loader Information")
@@ -860,11 +518,6 @@ def main():
                                 log_dict["gpu_memory_allocated_mb"] = torch.cuda.memory_allocated(0) / 1024**2
                                 log_dict["gpu_memory_reserved_mb"] = torch.cuda.memory_reserved(0) / 1024**2
                             
-                            # Add GPU utilization if available
-                            gpu_util = get_gpu_utilization()
-                            if gpu_util is not None:
-                                log_dict["gpu_utilization_percent"] = gpu_util
-                            
                             wandb.log(log_dict)
                         
                         if (i + 1) % 10 == 0:
@@ -876,33 +529,20 @@ def main():
                         if (i + 1) % 100 == 0 and wandb_api_key:
                             logger.info(f"Running periodic evaluation at batch {i+1}")
                             try:
-                                eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20, return_samples=False)
+                                eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20)
                                 
-                                log_dict = {
+                                wandb.log({
                                     "periodic_mean_iou": eval_metrics['mean_iou'],
                                     "periodic_precision": eval_metrics['precision'],
                                     "periodic_recall": eval_metrics['recall'],
                                     "periodic_f1_score": eval_metrics['f1_score'],
-                                    "periodic_map": eval_metrics.get('map', 0.0),
-                                    "periodic_map_50": eval_metrics.get('map_50', 0.0),
-                                    "periodic_map_75": eval_metrics.get('map_75', 0.0),
                                     "periodic_batch": i + 1 + epoch * len(train_loader)
-                                }
-                                
-                                # Add predictions per image histogram if available
-                                if 'predictions_per_image' in eval_metrics and eval_metrics['predictions_per_image']:
-                                    hist_fig = create_predictions_per_image_histogram(eval_metrics['predictions_per_image'])
-                                    if hist_fig:
-                                        log_dict["periodic_predictions_per_image_hist"] = wandb.Image(hist_fig)
-                                        plt.close(hist_fig)
-                                
-                                wandb.log(log_dict)
+                                })
                                 
                                 logger.info(f"Periodic Eval - IoU: {eval_metrics['mean_iou']:.3f}, "
                                            f"Precision: {eval_metrics['precision']:.3f}, "
                                            f"Recall: {eval_metrics['recall']:.3f}, "
-                                           f"F1: {eval_metrics['f1_score']:.3f}, "
-                                           f"mAP: {eval_metrics.get('map', 0.0):.3f}")
+                                           f"F1: {eval_metrics['f1_score']:.3f}")
                             except Exception as e:
                                 logger.warning(f"Periodic evaluation failed: {e}")
                     else:
@@ -1018,18 +658,12 @@ def main():
         console.print("[yellow]🔍 Running validation evaluation...[/yellow]")
         logger.info("Computing comprehensive evaluation metrics on validation set")
         
-        # Get metrics with samples for visualization (only on last epoch or every few epochs)
-        return_samples = (epoch == num_epochs - 1) or (epoch % max(1, num_epochs // 4) == 0)
-        eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None, return_samples=return_samples)
+        eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None)
         
         console.print(f"[green]📊 Eval Metrics - IoU:[/green] {eval_metrics['mean_iou']:.3f} | "
                     f"[green]Precision:[/green] {eval_metrics['precision']:.3f} | "
                     f"[green]Recall:[/green] {eval_metrics['recall']:.3f} | "
                     f"[green]F1 Score:[/green] {eval_metrics['f1_score']:.3f}")
-        
-        console.print(f"[cyan]mAP Metrics - mAP:[/cyan] {eval_metrics.get('map', 0.0):.3f} | "
-                    f"[cyan]mAP@0.5:[/cyan] {eval_metrics.get('map_50', 0.0):.3f} | "
-                    f"[cyan]mAP@0.75:[/cyan] {eval_metrics.get('map_75', 0.0):.3f}")
         
         console.print(f"[cyan]Detection Stats - TP:[/cyan] {eval_metrics['true_positives']} | "
                     f"[red]FP:[/red] {eval_metrics['false_positives']} | "
@@ -1038,19 +672,12 @@ def main():
         logger.info(f"Eval Metrics - IoU: {eval_metrics['mean_iou']:.3f}, "
                    f"Precision: {eval_metrics['precision']:.3f}, "
                    f"Recall: {eval_metrics['recall']:.3f}, "
-                   f"F1: {eval_metrics['f1_score']:.3f}, "
-                   f"mAP: {eval_metrics.get('map', 0.0):.3f}, "
-                   f"mAP@0.5: {eval_metrics.get('map_50', 0.0):.3f}, "
-                   f"mAP@0.75: {eval_metrics.get('map_75', 0.0):.3f}")
+                   f"F1: {eval_metrics['f1_score']:.3f}")
         
         # Log epoch summary to W&B (primary metrics that match console output)
         if wandb_api_key:
             epoch_time = time.time() - epoch_start_time
-            
-            # Get GPU utilization if available
-            gpu_utilization = get_gpu_utilization()
-            
-            log_dict = {
+            wandb.log({
                 "epoch": epoch,
                 # Primary losses (these match what's shown in console)
                 "train_loss": avg_train_loss,
@@ -1084,53 +711,8 @@ def main():
                 "val_f1_score": eval_metrics['f1_score'],
                 "val_true_positives": eval_metrics['true_positives'],
                 "val_false_positives": eval_metrics['false_positives'],
-                "val_false_negatives": eval_metrics['false_negatives'],
-                # mAP metrics
-                "val_map": eval_metrics.get('map', 0.0),
-                "val_map_50": eval_metrics.get('map_50', 0.0),
-                "val_map_75": eval_metrics.get('map_75', 0.0)
-            }
-            
-            # Add GPU utilization if available
-            if gpu_utilization is not None:
-                log_dict["gpu_utilization_percent"] = gpu_utilization
-            
-            # Add GPU memory metrics if available
-            if torch.cuda.is_available():
-                log_dict["gpu_memory_allocated_mb"] = torch.cuda.memory_allocated(0) / 1024**2
-                log_dict["gpu_memory_reserved_mb"] = torch.cuda.memory_reserved(0) / 1024**2
-                log_dict["gpu_memory_max_allocated_mb"] = torch.cuda.max_memory_allocated(0) / 1024**2
-            
-            # Add visualizations if available
-            if return_samples and 'sample_images' in eval_metrics and eval_metrics['sample_images']:
-                # Sample predictions grid
-                sample_grid = create_sample_predictions_grid(eval_metrics['sample_images'])
-                if sample_grid:
-                    log_dict["sample_predictions"] = wandb.Image(sample_grid)
-                    plt.close(sample_grid)
-            
-            # Precision-Recall curve
-            if 'precision_recall_pairs' in eval_metrics and eval_metrics['precision_recall_pairs']:
-                pr_curve = create_precision_recall_curve(eval_metrics['precision_recall_pairs'])
-                if pr_curve:
-                    log_dict["precision_recall_curve"] = wandb.Image(pr_curve)
-                    plt.close(pr_curve)
-            
-            # Confusion matrix
-            if 'confusion_matrix_data' in eval_metrics and eval_metrics['confusion_matrix_data']:
-                cm_fig = create_confusion_matrix(eval_metrics['confusion_matrix_data'])
-                if cm_fig:
-                    log_dict["confusion_matrix"] = wandb.Image(cm_fig)
-                    plt.close(cm_fig)
-            
-            # Predictions per image histogram
-            if 'predictions_per_image' in eval_metrics and eval_metrics['predictions_per_image']:
-                hist_fig = create_predictions_per_image_histogram(eval_metrics['predictions_per_image'])
-                if hist_fig:
-                    log_dict["predictions_per_image_hist"] = wandb.Image(hist_fig)
-                    plt.close(hist_fig)
-            
-            wandb.log(log_dict)
+                "val_false_negatives": eval_metrics['false_negatives']
+            })
         
         # Track best model (based on validation IoU)
         if eval_metrics['mean_iou'] > best_val_iou:
@@ -1180,7 +762,7 @@ def main():
     torch.save(save_dict, model_save_path)
     
     # Also save best model separately if different from final model
-    if best_model_state and any(not torch.equal(best_model_state[k], model.state_dict()[k]) for k in best_model_state.keys()):
+    if best_model_state and best_model_state != model.state_dict():
         best_model_path = os.path.join(model_save_dir, f'best_model_iou{best_val_iou:.3f}_epoch{best_epoch+1}_{timestamp}.pth')
         torch.save({
             'model_state_dict': best_model_state,
