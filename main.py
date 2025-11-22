@@ -663,7 +663,9 @@ def main():
     logger.info("Creating data loaders")
     
     batch_size = int(os.getenv("BATCH_SIZE", "4"))
-    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size)
+    num_workers = int(os.getenv("NUM_WORKERS", "2"))
+    logger.info(f"DataLoader configuration: batch_size={batch_size}, num_workers={num_workers}")
+    train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size, num_workers=num_workers)
     
     # Display data loader information
     data_info_table = Table(title="Data Loader Information")
