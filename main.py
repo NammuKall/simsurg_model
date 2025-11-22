@@ -94,7 +94,8 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
     
     if len(all_predictions) == 0:
         return {
-            'mean_iou': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
+            'mean_iou': 0.0, 'min_iou': 0.0, 'max_iou': 0.0, 'std_iou': 0.0,
+            'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
             'true_positives': 0, 'false_positives': 0, 'false_negatives': 0
         }
     
@@ -151,6 +152,9 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
     
     # Calculate metrics
     mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else 0.0
+    min_iou = np.min(iou_scores) if len(iou_scores) > 0 else 0.0
+    max_iou = np.max(iou_scores) if len(iou_scores) > 0 else 0.0
+    std_iou = np.std(iou_scores) if len(iou_scores) > 0 else 0.0
     
     precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0.0
     recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0.0
@@ -158,6 +162,9 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
     
     return {
         'mean_iou': float(mean_iou),
+        'min_iou': float(min_iou),
+        'max_iou': float(max_iou),
+        'std_iou': float(std_iou),
         'precision': float(precision),
         'recall': float(recall),
         'f1_score': float(f1_score),
@@ -439,6 +446,7 @@ def main():
         successful_batches = 0
         failed_batches = 0
         batch_losses = []  # Track individual batch losses for detailed logging
+        grad_norms = []  # Track gradient norms for epoch-level statistics
         
         # Create progress bar for training
         with Progress(
@@ -498,6 +506,7 @@ def main():
                         loss_value = loss.item()
                         train_loss += loss_value
                         batch_losses.append(loss_value)
+                        grad_norms.append(grad_norm)
                         num_batches += 1
                         successful_batches += 1
                         
@@ -537,6 +546,9 @@ def main():
                                 
                                 wandb.log({
                                     "periodic_mean_iou": eval_metrics['mean_iou'],
+                                    "periodic_min_iou": eval_metrics['min_iou'],
+                                    "periodic_max_iou": eval_metrics['max_iou'],
+                                    "periodic_std_iou": eval_metrics['std_iou'],
                                     "periodic_precision": eval_metrics['precision'],
                                     "periodic_recall": eval_metrics['recall'],
                                     "periodic_f1_score": eval_metrics['f1_score'],
@@ -578,6 +590,12 @@ def main():
         min_batch_loss = np.min(batch_losses) if batch_losses else 0
         max_batch_loss = np.max(batch_losses) if batch_losses else 0
         std_batch_loss = np.std(batch_losses) if batch_losses else 0
+        
+        # Compute gradient norm statistics
+        min_grad_norm = np.min(grad_norms) if grad_norms else 0
+        max_grad_norm = np.max(grad_norms) if grad_norms else 0
+        avg_grad_norm = np.mean(grad_norms) if grad_norms else 0
+        std_grad_norm = np.std(grad_norms) if grad_norms else 0
         
         # Log epoch training results with performance
         console.print(f"[green]📈 Training Loss:[/green] {avg_train_loss:.4f} | "
@@ -699,6 +717,13 @@ def main():
                 "val_batch_loss_max": max_val_batch_loss,
                 "val_batch_loss_std": std_val_batch_loss,
                 "val_batch_loss_avg": avg_val_loss,
+                # Gradient norm statistics
+                "grad_norm_min": min_grad_norm,
+                "grad_norm_max": max_grad_norm,
+                "grad_norm_avg": avg_grad_norm,
+                "grad_norm_std": std_grad_norm,
+                # Learning rate
+                "learning_rate": optimizer.param_groups[0]['lr'],
                 # Performance metrics
                 "epoch_time": epoch_time,
                 "avg_batch_time": avg_batch_time,
@@ -711,8 +736,13 @@ def main():
                 "total_val_batches": val_successful_batches + val_failed_batches,
                 "successful_train_batches": successful_batches,
                 "successful_val_batches": val_successful_batches,
+                "failed_train_batches": failed_batches,
+                "failed_val_batches": val_failed_batches,
                 # Evaluation metrics (computed on full validation set)
                 "val_mean_iou": eval_metrics['mean_iou'],
+                "val_min_iou": eval_metrics['min_iou'],
+                "val_max_iou": eval_metrics['max_iou'],
+                "val_std_iou": eval_metrics['std_iou'],
                 "val_precision": eval_metrics['precision'],
                 "val_recall": eval_metrics['recall'],
                 "val_f1_score": eval_metrics['f1_score'],
@@ -913,6 +943,9 @@ def main():
             "best_val_iou_final": best_val_iou,
             "best_epoch_final": best_epoch,
             "final_val_iou": final_eval_metrics['mean_iou'],
+            "final_val_min_iou": final_eval_metrics['min_iou'],
+            "final_val_max_iou": final_eval_metrics['max_iou'],
+            "final_val_std_iou": final_eval_metrics['std_iou'],
             "final_val_precision": final_eval_metrics['precision'],
             "final_val_recall": final_eval_metrics['recall'],
             "final_val_f1_score": final_eval_metrics['f1_score'],
