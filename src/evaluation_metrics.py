@@ -1,6 +1,5 @@
 #evaluation_metrics.py
 
-import os
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -88,21 +87,11 @@ def evaluate_model(model, data_loader, device, confidence_thresholds=None, iou_t
             
             # Process each image in the batch
             for i in range(len(images)):
-                if isinstance(predictions, list):
-                    if i < len(predictions):
-                        pred = predictions[i]
-                    else:
-                        continue  # Skip if prediction not available
-                else:
-                    # Handle dict format (shouldn't happen with EfficientDetModel, but handle gracefully)
-                    if 'boxes' in predictions and i < len(predictions['boxes']):
-                        pred = {
-                            'boxes': predictions['boxes'][i],
-                            'scores': predictions['scores'][i] if 'scores' in predictions else torch.zeros(len(predictions['boxes'][i])),
-                            'labels': predictions['labels'][i] if 'labels' in predictions else torch.zeros(len(predictions['boxes'][i]), dtype=torch.long)
-                        }
-                    else:
-                        continue  # Skip if prediction not available
+                pred = predictions[i] if isinstance(predictions, list) else {
+                    'boxes': predictions['boxes'][i],
+                    'scores': predictions['scores'][i],
+                    'labels': predictions['labels'][i]
+                }
                 
                 # Store predictions
                 pred_data = {
@@ -214,9 +203,11 @@ def calculate_metrics_at_threshold(predictions, ground_truths, conf_threshold, i
                         if pred_idx in matched_pred or pred_label != gt_label:
                             continue
                         
-                        # Boxes are already in xyxy format from coco_data_loader and model output
-                        # No conversion needed - use boxes directly
-                        iou = calculate_iou(gt_box, pred_box)
+                        # Convert boxes to xyxy format if needed
+                        gt_box_xyxy = convert_bbox_format(gt_box, 'coco', 'xyxy')
+                        pred_box_xyxy = convert_bbox_format(pred_box, 'coco', 'xyxy')
+                        
+                        iou = calculate_iou(gt_box_xyxy, pred_box_xyxy)
                         
                         if iou > best_iou:
                             best_iou = iou
