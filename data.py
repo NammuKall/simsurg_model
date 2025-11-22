@@ -98,7 +98,7 @@ class DataPipeline:
             ])
             
             if splits_exist:
-                logger.info("✓ Frames already extracted. Skipping extraction.")
+                logger.info("âœ“ Frames already extracted. Skipping extraction.")
                 logger.info("  Use --force-extract to re-extract frames")
                 return {'skipped': True}
         
@@ -109,7 +109,7 @@ class DataPipeline:
         results = extractor.extract_all_splits(self.data_dir)
         
         elapsed = time.time() - start_time
-        logger.info(f"\n✅ Frame extraction complete in {elapsed:.2f} seconds")
+        logger.info(f"\nâœ… Frame extraction complete in {elapsed:.2f} seconds")
         
         return results
     
@@ -137,7 +137,7 @@ class DataPipeline:
         wrangler.save_wrangled_data(wrangled_file)
         
         elapsed = time.time() - start_time
-        logger.info(f"\n✅ Data wrangling complete in {elapsed:.2f} seconds")
+        logger.info(f"\nâœ… Data wrangling complete in {elapsed:.2f} seconds")
         
         return wrangled_data
     
@@ -170,7 +170,7 @@ class DataPipeline:
         )
         
         elapsed = time.time() - start_time
-        logger.info(f"\n✅ COCO JSON creation complete in {elapsed:.2f} seconds")
+        logger.info(f"\nâœ… COCO JSON creation complete in {elapsed:.2f} seconds")
         
         return coco_paths
     
@@ -197,7 +197,7 @@ class DataPipeline:
         plotter.generate_all_plots()
         
         elapsed = time.time() - start_time
-        logger.info(f"\n✅ Plot generation complete in {elapsed:.2f} seconds")
+        logger.info(f"\nâœ… Plot generation complete in {elapsed:.2f} seconds")
     
     def run_full_pipeline(self, skip_extraction=True, train_ratio=0.7, val_ratio=0.15):
         """
@@ -213,9 +213,9 @@ class DataPipeline:
         """
         total_start = time.time()
         
-        logger.info("\n" + "🚀 "*20)
+        logger.info("\n" + "ðŸš€ "*20)
         logger.info("STARTING FULL DATA PIPELINE")
-        logger.info("🚀 "*20 + "\n")
+        logger.info("ðŸš€ "*20 + "\n")
         
         try:
             # Step 1: Extract frames
@@ -233,26 +233,26 @@ class DataPipeline:
             # Pipeline complete
             total_elapsed = time.time() - total_start
             
-            logger.info("\n" + "🎉 "*20)
+            logger.info("\n" + "ðŸŽ‰ "*20)
             logger.info("PIPELINE COMPLETE!")
-            logger.info("🎉 "*20)
+            logger.info("ðŸŽ‰ "*20)
             logger.info(f"\nTotal time: {total_elapsed:.2f} seconds ({total_elapsed/60:.2f} minutes)")
             logger.info(f"\nOutputs:")
-            logger.info(f"  ├─ COCO format: {self.output_dir}")
-            logger.info(f"  │  ├─ train/images/")
-            logger.info(f"  │  ├─ val/images/")
-            logger.info(f"  │  ├─ test/images/")
-            logger.info(f"  │  └─ annotations/")
-            logger.info(f"  │     ├─ instances_train.json")
-            logger.info(f"  │     ├─ instances_val.json")
-            logger.info(f"  │     └─ instances_test.json")
-            logger.info(f"  └─ Plots: {self.plots_dir}")
-            logger.info(f"     ├─ dataset_overview.png")
-            logger.info(f"     ├─ class_distribution_by_split.png")
-            logger.info(f"     ├─ bbox_statistics.png")
-            logger.info(f"     └─ sample_annotations.png")
+            logger.info(f"  â”œâ”€ COCO format: {self.output_dir}")
+            logger.info(f"  â”‚  â”œâ”€ train/images/")
+            logger.info(f"  â”‚  â”œâ”€ val/images/")
+            logger.info(f"  â”‚  â”œâ”€ test/images/")
+            logger.info(f"  â”‚  â””â”€ annotations/")
+            logger.info(f"  â”‚     â”œâ”€ instances_train.json")
+            logger.info(f"  â”‚     â”œâ”€ instances_val.json")
+            logger.info(f"  â”‚     â””â”€ instances_test.json")
+            logger.info(f"  â””â”€ Plots: {self.plots_dir}")
+            logger.info(f"     â”œâ”€ dataset_overview.png")
+            logger.info(f"     â”œâ”€ class_distribution_by_split.png")
+            logger.info(f"     â”œâ”€ bbox_statistics.png")
+            logger.info(f"     â””â”€ sample_annotations.png")
             
-            logger.info(f"\n📊 Next steps:")
+            logger.info(f"\nðŸ“Š Next steps:")
             logger.info(f"  1. Review plots in {self.plots_dir}")
             logger.info(f"  2. Verify COCO format in {self.output_dir}")
             logger.info(f"  3. Start training with: python main.py")
@@ -260,7 +260,7 @@ class DataPipeline:
             return coco_paths
             
         except Exception as e:
-            logger.error(f"\n❌ Pipeline failed: {e}")
+            logger.error(f"\nâŒ Pipeline failed: {e}")
             raise
 
 
