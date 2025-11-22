@@ -213,13 +213,17 @@ def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4, target_size=(
     print(f"Created datasets with {len(train_dataset)} training, {len(val_dataset)} validation, and {len(test_dataset)} test samples")
     print(f"Images will be resized to: {target_size}")
     
-    # Create data loaders
+    # Create data loaders with optimizations
+    # pin_memory=True speeds up GPU transfers when using CUDA
+    pin_memory = torch.cuda.is_available()
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0
     )
     
     val_loader = DataLoader(
@@ -227,7 +231,9 @@ def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4, target_size=(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0
     )
     
     test_loader = DataLoader(
@@ -235,7 +241,9 @@ def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4, target_size=(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0
     )
     
     return train_loader, val_loader, test_loader
