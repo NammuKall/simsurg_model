@@ -200,9 +200,7 @@ class DataWrangler:
                     
                     for ann_id, ann in all_annotations.items():
                         # Only process annotations for frame_id == 1
-                        # Use integer comparison to avoid floating point precision issues
-                        frame_id = ann.get('frame_id')
-                        if frame_id is not None and (frame_id == 1 or abs(frame_id - 1.0) < 0.001):
+                        if ann.get('frame_id') == 1.0:
                             frame_1_found = True
                             if self.validate_annotation(ann, img_width, img_height):
                                 # Parse coordinates
@@ -298,13 +296,13 @@ class DataWrangler:
                 logger.info(f"  Avg annotations/image: {avg_ann:.1f}")
             
             if self.stats[split]['missing_annotations'] > 0:
-                logger.info(f"  ⚠️  Missing annotations: {self.stats[split]['missing_annotations']}")
+                logger.info(f"  âš ï¸  Missing annotations: {self.stats[split]['missing_annotations']}")
             if self.stats[split]['missing_images'] > 0:
-                logger.info(f"  ⚠️  Missing images: {self.stats[split]['missing_images']}")
+                logger.info(f"  âš ï¸  Missing images: {self.stats[split]['missing_images']}")
             if self.stats[split]['invalid_annotations'] > 0:
-                logger.info(f"  ⚠️  Invalid annotations: {self.stats[split]['invalid_annotations']}")
+                logger.info(f"  âš ï¸  Invalid annotations: {self.stats[split]['invalid_annotations']}")
             if self.stats[split]['processing_errors'] > 0:
-                logger.info(f"  ❌ Processing errors: {self.stats[split]['processing_errors']}")
+                logger.info(f"  âŒ Processing errors: {self.stats[split]['processing_errors']}")
         
         # Overall statistics
         total_pairs = sum(len(data) for data in self.wrangled_data.values())
