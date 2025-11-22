@@ -124,15 +124,40 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
             best_iou = 0.0
             best_pred_idx = -1
             
+            # Convert label to scalar for comparison
+            gt_label_val = gt_label.item() if isinstance(gt_label, torch.Tensor) else gt_label
+            
             for pred_idx, (pred_box, pred_label) in enumerate(zip(pred_boxes, pred_labels)):
                 if pred_idx in matched_preds:
                     continue
                 
-                if pred_label != gt_label:
+                # Convert label to scalar for comparison
+                pred_label_val = pred_label.item() if isinstance(pred_label, torch.Tensor) else pred_label
+                
+                if pred_label_val != gt_label_val:
                     continue
                 
-                # Calculate IoU
-                iou = IOU(pred_box.numpy(), gt_box.numpy())
+                # Calculate IoU - handle both tensor and numpy inputs
+                if isinstance(pred_box, torch.Tensor):
+                    pred_box_np = pred_box.cpu().numpy()
+                    # Flatten if needed (handle [1, 4] -> [4])
+                    if pred_box_np.ndim > 1:
+                        pred_box_np = pred_box_np.flatten()
+                else:
+                    pred_box_np = np.array(pred_box).flatten()
+                if isinstance(gt_box, torch.Tensor):
+                    gt_box_np = gt_box.cpu().numpy()
+                    # Flatten if needed
+                    if gt_box_np.ndim > 1:
+                        gt_box_np = gt_box_np.flatten()
+                else:
+                    gt_box_np = np.array(gt_box).flatten()
+                
+                # Ensure we have exactly 4 values
+                if len(pred_box_np) != 4 or len(gt_box_np) != 4:
+                    continue
+                
+                iou = IOU(pred_box_np, gt_box_np)
                 
                 if iou > best_iou:
                     best_iou = iou
@@ -529,20 +554,24 @@ def main():
                         if (i + 1) % 100 == 0 and wandb_api_key:
                             logger.info(f"Running periodic evaluation at batch {i+1}")
                             try:
-                                eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=20)
+                                # Use more samples for more reliable periodic metrics
+                                periodic_metrics = compute_detection_metrics(model, val_loader, device, num_samples=50)
                                 
                                 wandb.log({
-                                    "periodic_mean_iou": eval_metrics['mean_iou'],
-                                    "periodic_precision": eval_metrics['precision'],
-                                    "periodic_recall": eval_metrics['recall'],
-                                    "periodic_f1_score": eval_metrics['f1_score'],
+                                    "periodic_val_mean_iou": periodic_metrics['mean_iou'],
+                                    "periodic_val_precision": periodic_metrics['precision'],
+                                    "periodic_val_recall": periodic_metrics['recall'],
+                                    "periodic_val_f1_score": periodic_metrics['f1_score'],
                                     "periodic_batch": i + 1 + epoch * len(train_loader)
                                 })
                                 
-                                logger.info(f"Periodic Eval - IoU: {eval_metrics['mean_iou']:.3f}, "
-                                           f"Precision: {eval_metrics['precision']:.3f}, "
-                                           f"Recall: {eval_metrics['recall']:.3f}, "
-                                           f"F1: {eval_metrics['f1_score']:.3f}")
+                                logger.info(f"Periodic Val Eval (50 samples) - IoU: {periodic_metrics['mean_iou']:.3f}, "
+                                           f"Precision: {periodic_metrics['precision']:.3f}, "
+                                           f"Recall: {periodic_metrics['recall']:.3f}, "
+                                           f"F1: {periodic_metrics['f1_score']:.3f} "
+                                           f"(TP: {periodic_metrics['true_positives']}, "
+                                           f"FP: {periodic_metrics['false_positives']}, "
+                                           f"FN: {periodic_metrics['false_negatives']})")
                             except Exception as e:
                                 logger.warning(f"Periodic evaluation failed: {e}")
                     else:
@@ -581,6 +610,21 @@ def main():
         logger.info(f"Epoch {epoch+1} training completed - Loss: {avg_train_loss:.4f}, "
                    f"Successful: {successful_batches}, Failed: {failed_batches}, "
                    f"Avg Batch Time: {avg_batch_time:.3f}s, Speed: {avg_samples_per_sec:.1f} samples/sec")
+        
+        # Compute training metrics
+        console.print("[yellow]🔍 Computing training metrics...[/yellow]")
+        logger.info("Computing training detection metrics")
+        train_metrics = compute_detection_metrics(model, train_loader, device, num_samples=None)
+        
+        console.print(f"[green]📊 Train Metrics - IoU:[/green] {train_metrics['mean_iou']:.3f} | "
+                    f"[green]Precision:[/green] {train_metrics['precision']:.3f} | "
+                    f"[green]Recall:[/green] {train_metrics['recall']:.3f} | "
+                    f"[green]F1 Score:[/green] {train_metrics['f1_score']:.3f}")
+        
+        logger.info(f"Train Metrics - IoU: {train_metrics['mean_iou']:.3f}, "
+                   f"Precision: {train_metrics['precision']:.3f}, "
+                   f"Recall: {train_metrics['recall']:.3f}, "
+                   f"F1: {train_metrics['f1_score']:.3f}")
         
         # Validation phase
         model.eval()
@@ -658,21 +702,31 @@ def main():
         console.print("[yellow]🔍 Running validation evaluation...[/yellow]")
         logger.info("Computing comprehensive evaluation metrics on validation set")
         
-        eval_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None)
+        val_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None)
         
-        console.print(f"[green]📊 Eval Metrics - IoU:[/green] {eval_metrics['mean_iou']:.3f} | "
-                    f"[green]Precision:[/green] {eval_metrics['precision']:.3f} | "
-                    f"[green]Recall:[/green] {eval_metrics['recall']:.3f} | "
-                    f"[green]F1 Score:[/green] {eval_metrics['f1_score']:.3f}")
+        # Display both training and validation metrics together
+        console.print(f"\n[bold cyan]📊 Epoch {epoch+1} Metrics Summary[/bold cyan]")
+        console.print(f"[green]Training   - IoU:[/green] {train_metrics['mean_iou']:.3f} | "
+                    f"[green]Precision:[/green] {train_metrics['precision']:.3f} | "
+                    f"[green]Recall:[/green] {train_metrics['recall']:.3f} | "
+                    f"[green]F1:[/green] {train_metrics['f1_score']:.3f}")
+        console.print(f"[blue]Validation - IoU:[/blue] {val_metrics['mean_iou']:.3f} | "
+                    f"[blue]Precision:[/blue] {val_metrics['precision']:.3f} | "
+                    f"[blue]Recall:[/blue] {val_metrics['recall']:.3f} | "
+                    f"[blue]F1:[/blue] {val_metrics['f1_score']:.3f}")
         
-        console.print(f"[cyan]Detection Stats - TP:[/cyan] {eval_metrics['true_positives']} | "
-                    f"[red]FP:[/red] {eval_metrics['false_positives']} | "
-                    f"[yellow]FN:[/yellow] {eval_metrics['false_negatives']}")
+        console.print(f"[cyan]Val Detection Stats - TP:[/cyan] {val_metrics['true_positives']} | "
+                    f"[red]FP:[/red] {val_metrics['false_positives']} | "
+                    f"[yellow]FN:[/yellow] {val_metrics['false_negatives']}")
         
-        logger.info(f"Eval Metrics - IoU: {eval_metrics['mean_iou']:.3f}, "
-                   f"Precision: {eval_metrics['precision']:.3f}, "
-                   f"Recall: {eval_metrics['recall']:.3f}, "
-                   f"F1: {eval_metrics['f1_score']:.3f}")
+        logger.info(f"Train Metrics - IoU: {train_metrics['mean_iou']:.3f}, "
+                   f"Precision: {train_metrics['precision']:.3f}, "
+                   f"Recall: {train_metrics['recall']:.3f}, "
+                   f"F1: {train_metrics['f1_score']:.3f}")
+        logger.info(f"Val Metrics - IoU: {val_metrics['mean_iou']:.3f}, "
+                   f"Precision: {val_metrics['precision']:.3f}, "
+                   f"Recall: {val_metrics['recall']:.3f}, "
+                   f"F1: {val_metrics['f1_score']:.3f}")
         
         # Log epoch summary to W&B (primary metrics that match console output)
         if wandb_api_key:
@@ -704,19 +758,27 @@ def main():
                 "total_val_batches": val_successful_batches + val_failed_batches,
                 "successful_train_batches": successful_batches,
                 "successful_val_batches": val_successful_batches,
-                # Evaluation metrics (computed on full validation set)
-                "val_mean_iou": eval_metrics['mean_iou'],
-                "val_precision": eval_metrics['precision'],
-                "val_recall": eval_metrics['recall'],
-                "val_f1_score": eval_metrics['f1_score'],
-                "val_true_positives": eval_metrics['true_positives'],
-                "val_false_positives": eval_metrics['false_positives'],
-                "val_false_negatives": eval_metrics['false_negatives']
+                # Training metrics (computed on full training set)
+                "train_mean_iou": train_metrics['mean_iou'],
+                "train_precision": train_metrics['precision'],
+                "train_recall": train_metrics['recall'],
+                "train_f1_score": train_metrics['f1_score'],
+                "train_true_positives": train_metrics['true_positives'],
+                "train_false_positives": train_metrics['false_positives'],
+                "train_false_negatives": train_metrics['false_negatives'],
+                # Validation metrics (computed on full validation set)
+                "val_mean_iou": val_metrics['mean_iou'],
+                "val_precision": val_metrics['precision'],
+                "val_recall": val_metrics['recall'],
+                "val_f1_score": val_metrics['f1_score'],
+                "val_true_positives": val_metrics['true_positives'],
+                "val_false_positives": val_metrics['false_positives'],
+                "val_false_negatives": val_metrics['false_negatives']
             })
         
         # Track best model (based on validation IoU)
-        if eval_metrics['mean_iou'] > best_val_iou:
-            best_val_iou = eval_metrics['mean_iou']
+        if val_metrics['mean_iou'] > best_val_iou:
+            best_val_iou = val_metrics['mean_iou']
             best_epoch = epoch
             best_model_state = model.state_dict()
             console.print(f"[green]✨ New best model! IoU:[/green] {best_val_iou:.3f}")
