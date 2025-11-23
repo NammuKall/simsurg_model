@@ -88,9 +88,9 @@ class YOLOv5Model(nn.Module):
         
         # YOLOv5 uses 3 detection scales with PANet (Path Aggregation Network)
         # Detection heads
-        self.detect_scale1 = self._make_yolov5_head(backbone_channels[3], num_classes)  # Large objects
-        self.detect_scale2 = self._make_yolov5_head(backbone_channels[2], num_classes)  # Medium objects
-        self.detect_scale3 = self._make_yolov5_head(backbone_channels[1], num_classes)  # Small objects
+        self.detect_scale1 = self._make_yolov5_head(backbone_channels[3], self.num_classes)  # Large objects
+        self.detect_scale2 = self._make_yolov5_head(backbone_channels[2], self.num_classes)  # Medium objects
+        self.detect_scale3 = self._make_yolov5_head(backbone_channels[1], self.num_classes)  # Small objects
         
         # PANet upsampling and downsampling paths
         self.upsample1 = nn.Upsample(scale_factor=2, mode='nearest')
