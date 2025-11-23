@@ -173,7 +173,7 @@ def collate_fn(batch):
     return images, targets
 
 
-def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=4, target_size=(720, 1280)):
+def get_coco_data_loaders(coco_paths, batch_size=8, num_workers=2, target_size=(720, 1280)):
     """
     Get PyTorch DataLoaders for COCO dataset
     
