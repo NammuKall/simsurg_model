@@ -54,7 +54,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 # Import model and data loading
-from src.models import EfficientDetModel
+from src.models.model_factory import create_model, get_model_info
 from src.coco_data_loader import get_coco_data_loaders
 
 console = Console()
@@ -243,14 +243,36 @@ def run_inference(model_path: str, coco_paths: Dict, output_dir: str = "inferenc
     console.print(f"[blue]Loading model from {model_path}[/blue]")
     checkpoint = torch.load(model_path, map_location=device)
     
-    model = EfficientDetModel(num_classes=2).to(device)
-    if 'model_state_dict' in checkpoint:
+    # Determine model name from checkpoint or environment
+    if isinstance(checkpoint, dict) and 'model_architecture' in checkpoint:
+        model_name = checkpoint['model_architecture']
+        console.print(f"[cyan]Detected model type from checkpoint:[/cyan] {model_name}")
+    else:
+        model_name = os.getenv("MODEL_NAME", "EfficientDet")
+        console.print(f"[cyan]Using model from environment/config:[/cyan] {model_name}")
+    
+    model_variant = os.getenv("MODEL_VARIANT", None)
+    if isinstance(checkpoint, dict) and 'model_variant' in checkpoint:
+        model_variant = checkpoint.get('model_variant', model_variant)
+    
+    # Create model using factory
+    model = create_model(
+        model_name=model_name,
+        num_classes=2,
+        device=device,
+        variant=model_variant if model_variant else None
+    )
+    
+    # Load checkpoint
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
+    elif isinstance(checkpoint, dict) and 'best_model_state' in checkpoint:
+        model.load_state_dict(checkpoint['best_model_state'])
     else:
         model.load_state_dict(checkpoint)
     
     model.eval()
-    console.print("[green]âœ… Model loaded successfully[/green]")
+    console.print(f"[green]✅ Model loaded successfully[/green] ({model_name})")
     
     # Get data loader
     _, _, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size)

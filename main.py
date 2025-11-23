@@ -30,7 +30,7 @@ import colorlog
 load_dotenv()
 
 # Import local modules
-from src.models import EfficientDetModel
+from src.models.model_factory import create_model, get_model_info
 from src.coco_data_loader import get_coco_data_loaders
 from src.training import train_epoch, validate_epoch, compute_and_log_metrics
 from src.testing import compute_detection_metrics
@@ -132,6 +132,7 @@ def initialize_wandb():
         logger.warning("WANDB_API_KEY not found in environment variables")
     
     if wandb_api_key:
+        model_name = os.getenv("MODEL_NAME", "EfficientDet")
         wandb.init(
             project=os.getenv("WANDB_PROJECT", "simsurg-model"),
             entity=os.getenv("WANDB_ENTITY"),
@@ -140,7 +141,8 @@ def initialize_wandb():
                 "learning_rate": float(os.getenv("LEARNING_RATE", "0.001")),
                 "batch_size": int(os.getenv("BATCH_SIZE", "4")),
                 "num_epochs": int(os.getenv("NUM_EPOCHS", "10")),
-                "model": "EfficientDetModel",
+                "model": model_name,
+                "model_variant": os.getenv("MODEL_VARIANT", None),
                 "dataset": "SimSurgSkill",
                 "num_classes": 2,
                 "optimizer": "Adam",
@@ -245,7 +247,26 @@ def setup_device_and_model(wandb_api_key):
                 "training_mode": "cpu"
             })
     
-    model = EfficientDetModel(num_classes=2).to(device)
+    # Get model name from environment or use default
+    model_name = os.getenv("MODEL_NAME", "EfficientDet")
+    model_variant = os.getenv("MODEL_VARIANT", None)
+    
+    # Display model selection info
+    model_info = get_model_info(model_name)
+    console.print(f"[bold cyan]📦 Selected Model:[/bold cyan] {model_name}")
+    if model_variant:
+        console.print(f"[cyan]   Variant:[/cyan] {model_variant}")
+    console.print(f"[cyan]   Description:[/cyan] {model_info.get('description', 'N/A')}")
+    logger.info(f"Creating {model_name} model" + (f" (variant: {model_variant})" if model_variant else ""))
+    
+    # Create model using factory
+    model = create_model(
+        model_name=model_name,
+        num_classes=2,
+        device=device,
+        variant=model_variant
+    )
+    
     learning_rate = float(os.getenv("LEARNING_RATE", "0.001"))
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
@@ -259,14 +280,17 @@ def setup_device_and_model(wandb_api_key):
         wandb.config.update({
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
-            "model_architecture": "EfficientDetModel"
+            "model_architecture": model_name,
+            "model_variant": model_variant if model_variant else "default",
+            "model_class": model_info.get('class', 'N/A')
         })
     
     return device, model, optimizer, learning_rate, total_params
 
 
 def save_model(model, best_model_state, optimizer, train_losses, val_losses, best_val_iou, 
-              best_epoch, num_epochs, learning_rate, batch_size, base_dir, wandb_api_key):
+              best_epoch, num_epochs, learning_rate, batch_size, base_dir, wandb_api_key,
+              model_name=None, model_variant=None):
     """Save model and upload to W&B if enabled"""
     console.print(Panel.fit(
         "[bold green]SAVING MODEL[/bold green]",
@@ -280,6 +304,12 @@ def save_model(model, best_model_state, optimizer, train_losses, val_losses, bes
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_save_path = os.path.join(model_save_dir, f'model_{timestamp}.pth')
     
+    # Get model name if not provided
+    if model_name is None:
+        model_name = os.getenv("MODEL_NAME", "EfficientDet")
+    if model_variant is None:
+        model_variant = os.getenv("MODEL_VARIANT", None)
+    
     save_dict = {
         'model_state_dict': model.state_dict(),
         'best_model_state': best_model_state if best_model_state else model.state_dict(),
@@ -291,7 +321,10 @@ def save_model(model, best_model_state, optimizer, train_losses, val_losses, bes
         'epoch': num_epochs,
         'learning_rate': learning_rate,
         'batch_size': batch_size,
-        'timestamp': timestamp
+        'timestamp': timestamp,
+        'model_architecture': model_name,
+        'model_variant': model_variant if model_variant else "default",
+        'num_classes': 2
     }
     
     torch.save(save_dict, model_save_path)
@@ -485,6 +518,10 @@ def main():
     
     device, model, optimizer, learning_rate, total_params = setup_device_and_model(wandb_api_key)
     
+    # Get model name and variant for saving
+    model_name = os.getenv("MODEL_NAME", "EfficientDet")
+    model_variant = os.getenv("MODEL_VARIANT", None)
+    
     # Training loop
     num_epochs = int(os.getenv("NUM_EPOCHS", "10"))
     train_losses = []
@@ -555,7 +592,8 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_save_path, best_model_path = save_model(
         model, best_model_state, optimizer, train_losses, val_losses, best_val_iou,
-        best_epoch, num_epochs, learning_rate, batch_size, paths['base_dir'], wandb_api_key
+        best_epoch, num_epochs, learning_rate, batch_size, paths['base_dir'], wandb_api_key,
+        model_name=model_name, model_variant=model_variant
     )
     
     training_plots_path = generate_training_plots(
