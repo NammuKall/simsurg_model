@@ -161,9 +161,20 @@ class YOLOv5Model(nn.Module):
         if targets is not None:
             # Training mode
             # Note: ultralytics YOLO expects different format
-            # For now, return a placeholder loss
-            # In production, you'd need to format targets for ultralytics
-            return {'loss': torch.tensor(0.0, device=x.device, requires_grad=True)}
+            # For training, we should use custom implementation or format targets properly
+            # For now, warn and use custom implementation fallback
+            import warnings
+            warnings.warn(
+                "Ultralytics YOLOv5 training mode not fully implemented. "
+                "Consider using custom implementation (set pretrained=False) or implement proper target formatting.",
+                UserWarning
+            )
+            # Fall back to custom implementation for training
+            self.use_ultralytics = False
+            if not hasattr(self, 'backbone_conv1'):
+                self.pretrained = True
+                self._build_custom_yolov5()
+            return self._forward_custom(x, targets)
         else:
             # Inference mode
             results = self._ultralytics_model(images)
@@ -194,6 +205,9 @@ class YOLOv5Model(nn.Module):
         """Forward pass using custom YOLOv5 implementation"""
         batch_size = x.shape[0]
         
+        # Store input image size for loss computation and postprocessing
+        input_img_size = (x.shape[2], x.shape[3])  # (H, W)
+        
         # Extract features from backbone
         x = self.backbone_conv1(x)
         x = self.backbone_bn1(x)
@@ -214,21 +228,22 @@ class YOLOv5Model(nn.Module):
         p3 = self.fusion2(p3)
         
         # Bottom-up path (for better feature fusion)
-        p4 = torch.cat([p4, self.downsample1(p3)], dim=1)
-        p5 = torch.cat([p5, self.downsample2(p4)], dim=1)
+        # Use original feature maps, not fused ones
+        p4_bottom = torch.cat([medium_features, self.downsample1(p3)], dim=1)
+        p5_bottom = torch.cat([large_features, self.downsample2(p4)], dim=1)
         
         # Detection at 3 scales
-        scale1_out = self.detect_scale1(p5)  # Large objects
-        scale2_out = self.detect_scale2(p4)  # Medium objects
+        scale1_out = self.detect_scale1(p5_bottom)  # Large objects
+        scale2_out = self.detect_scale2(p4_bottom)  # Medium objects
         scale3_out = self.detect_scale3(p3)  # Small objects
         
         if targets is not None:
             # Training mode: compute loss
-            loss = self.compute_loss([scale1_out, scale2_out, scale3_out], targets, x.shape[2:])
+            loss = self.compute_loss([scale1_out, scale2_out, scale3_out], targets, input_img_size)
             return {'loss': loss}
         else:
             # Inference mode: return predictions
-            return self.postprocess_predictions([scale1_out, scale2_out, scale3_out], x.shape[2:])
+            return self.postprocess_predictions([scale1_out, scale2_out, scale3_out], input_img_size)
     
     def compute_loss(self, predictions, targets, img_size):
         """
@@ -282,8 +297,9 @@ class YOLOv5Model(nn.Module):
                 # Extract components
                 pred_x = torch.sigmoid(anchor_pred[0])
                 pred_y = torch.sigmoid(anchor_pred[1])
-                pred_w = anchor_pred[2]
-                pred_h = anchor_pred[3]
+                # Apply exp() to ensure positive width/height (YOLOv5 style)
+                pred_w = torch.exp(anchor_pred[2])
+                pred_h = torch.exp(anchor_pred[3])
                 pred_conf = torch.sigmoid(anchor_pred[4])
                 pred_classes = anchor_pred[5:]
                 
@@ -308,8 +324,14 @@ class YOLOv5Model(nn.Module):
                 )
         
         # Combine losses with YOLOv5 weighting
-        total_loss = 0.05 * coord_loss + conf_loss + 0.5 * class_loss
-        return total_loss / batch_size if batch_size > 0 else total_loss
+        # Normalize by number of objects, not batch size
+        num_objects = sum(len(targets[i]['boxes']) for i in range(batch_size) if len(targets[i]['boxes']) > 0)
+        if num_objects > 0:
+            total_loss = (0.05 * coord_loss + conf_loss + 0.5 * class_loss) / num_objects
+        else:
+            # If no objects, return small loss to avoid division by zero
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        return total_loss
     
     def postprocess_predictions(self, predictions, img_size, score_threshold=0.25):
         """
@@ -348,8 +370,9 @@ class YOLOv5Model(nn.Module):
                         # Extract components
                         x_center = torch.sigmoid(anchor_pred[0]).item()
                         y_center = torch.sigmoid(anchor_pred[1]).item()
-                        w = anchor_pred[2].item()
-                        h = anchor_pred[3].item()
+                        # Apply exp() to ensure positive width/height (YOLOv5 style)
+                        w = torch.exp(anchor_pred[2]).item()
+                        h = torch.exp(anchor_pred[3]).item()
                         conf = torch.sigmoid(anchor_pred[4]).item()
                         
                         # Get class predictions
@@ -362,14 +385,18 @@ class YOLOv5Model(nn.Module):
                         
                         if final_score > score_threshold:
                             # Convert to absolute coordinates
-                            x_min = (x_center - w / 2) * img_size[1]
-                            y_min = (y_center - h / 2) * img_size[0]
-                            x_max = (x_center + w / 2) * img_size[1]
-                            y_max = (y_center + h / 2) * img_size[0]
+                            # Clamp coordinates to ensure valid boxes
+                            x_min = max(0, (x_center - w / 2) * img_size[1])
+                            y_min = max(0, (y_center - h / 2) * img_size[0])
+                            x_max = min(img_size[1], (x_center + w / 2) * img_size[1])
+                            y_max = min(img_size[0], (y_center + h / 2) * img_size[0])
                             
-                            boxes.append([x_min, y_min, x_max, y_max])
-                            scores.append(final_score)
-                            labels.append(int(class_idx.item()) + 1)  # Convert to 1-indexed
+                            # Ensure valid box (x_min < x_max, y_min < y_max)
+                            if x_max > x_min and y_max > y_min:
+                            
+                                boxes.append([x_min, y_min, x_max, y_max])
+                                scores.append(final_score)
+                                labels.append(int(class_idx.item()) + 1)  # Convert to 1-indexed
             
             # Convert to tensors
             if boxes:
