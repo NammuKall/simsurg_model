@@ -229,7 +229,7 @@ def compute_and_log_metrics(model, train_loader, val_loader, device, epoch, trai
     if compute_train_metrics:
         console.print("[yellow]🔍 Computing training metrics...[/yellow]")
         logger.info("Computing training detection metrics (limited to 100 samples)")
-        train_metrics = compute_detection_metrics(model, train_loader, device, num_samples=100)
+        train_metrics = compute_detection_metrics(model, train_loader, device, num_samples=50)
         
         console.print(f"[green]📊 Train Metrics - IoU:[/green] {train_metrics['mean_iou']:.3f} | "
                     f"[green]Precision:[/green] {train_metrics['precision']:.3f} | "
