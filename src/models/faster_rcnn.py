@@ -88,11 +88,27 @@ class FasterRCNNModel(nn.Module):
                 }
                 formatted_targets.append(formatted_target)
             
-            # Training mode: returns loss dict
-            loss_dict = self.model(x, formatted_targets)
-            # Sum all losses into a single scalar
-            total_loss = sum(loss_dict.values())
-            return {'loss': total_loss}
+            # FasterRCNN only returns loss dict when in training mode
+            # In eval mode, it returns predictions even with targets
+            # For validation loss computation, we need to temporarily enable training mode
+            was_training = self.model.training
+            try:
+                # Temporarily set to training mode to compute loss
+                self.model.train()
+                loss_dict = self.model(x, formatted_targets)
+                
+                # Verify that loss_dict is actually a dict (not a list)
+                if isinstance(loss_dict, dict):
+                    # Sum all losses into a single scalar
+                    total_loss = sum(loss_dict.values())
+                    return {'loss': total_loss}
+                else:
+                    # This shouldn't happen - if it does, it means FasterRCNN returned unexpected type
+                    raise ValueError(f"Expected loss dict when targets provided, got {type(loss_dict)}")
+            finally:
+                # Restore original training state
+                if not was_training:
+                    self.model.eval()
         else:
             # Inference mode: returns predictions
             self.model.eval()
