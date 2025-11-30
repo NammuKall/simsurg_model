@@ -31,7 +31,7 @@ load_dotenv()
 
 # Import local modules
 from src.models.model_factory import create_model, get_model_info
-from src.coco_data_loader import get_coco_data_loaders
+from src.data.coco_data_loader import get_coco_data_loaders
 from src.training import train_epoch, validate_epoch, compute_and_log_metrics
 from src.testing import compute_detection_metrics
 

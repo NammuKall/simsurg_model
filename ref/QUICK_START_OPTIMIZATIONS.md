@@ -3,7 +3,7 @@
 ## Immediate Actions (This Week)
 
 ### 1. Add Data Augmentation (2-3 hours)
-**File:** `src/coco_data_loader.py`
+**File:** `src/data/coco_data_loader.py`
 
 Add to `ToTensor` class or create new augmentation transforms:
 - Random horizontal flip (50%)

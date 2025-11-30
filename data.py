@@ -21,10 +21,10 @@ import time
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-from src.data_extractor import VideoFrameExtractor
-from src.data_wrangler import DataWrangler
-from src.coco_json import COCOJSONGenerator
-from src.plots import PlotGenerator
+from src.data.data_extractor import VideoFrameExtractor
+from src.data.data_wrangler import DataWrangler
+from src.data.coco_json import COCOJSONGenerator
+from src.data.plots import PlotGenerator
 
 # Set up logging
 logging.basicConfig(

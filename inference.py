@@ -55,7 +55,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 # Import model and data loading
 from src.models.model_factory import create_model, get_model_info
-from src.coco_data_loader import get_coco_data_loaders
+from src.data.coco_data_loader import get_coco_data_loaders
 
 console = Console()
 
