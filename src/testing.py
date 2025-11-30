@@ -89,8 +89,31 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
         gt_boxes = target['boxes']
         gt_labels = target['labels']
         
-        if len(gt_boxes) == 0:
-            false_positives += len(pred_boxes)
+        # Get lengths safely (handle both tensor and array types)
+        try:
+            if isinstance(pred_boxes, torch.Tensor):
+                num_pred_boxes = pred_boxes.shape[0] if pred_boxes.ndim > 0 else 0
+            else:
+                num_pred_boxes = len(pred_boxes) if hasattr(pred_boxes, '__len__') else 0
+        except (AttributeError, TypeError):
+            num_pred_boxes = 0
+            
+        try:
+            if isinstance(gt_boxes, torch.Tensor):
+                num_gt_boxes = gt_boxes.shape[0] if gt_boxes.ndim > 0 else 0
+            else:
+                num_gt_boxes = len(gt_boxes) if hasattr(gt_boxes, '__len__') else 0
+        except (AttributeError, TypeError):
+            num_gt_boxes = 0
+        
+        # Handle empty ground truth boxes
+        if num_gt_boxes == 0:
+            false_positives += num_pred_boxes
+            continue
+        
+        # Handle empty predictions - all ground truths become false negatives
+        if num_pred_boxes == 0:
+            false_negatives += num_gt_boxes
             continue
         
         # Match predictions to ground truths
@@ -104,6 +127,7 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
             # Convert label to scalar for comparison
             gt_label_val = gt_label.item() if isinstance(gt_label, torch.Tensor) else gt_label
             
+            # Iterate over predictions
             for pred_idx, (pred_box, pred_label) in enumerate(zip(pred_boxes, pred_labels)):
                 if pred_idx in matched_preds:
                     continue
@@ -127,8 +151,8 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
                     # Flatten if needed
                     if gt_box_np.ndim > 1:
                         gt_box_np = gt_box_np.flatten()
-                else:
-                    gt_box_np = np.array(gt_box).flatten()
+                    else:
+                        gt_box_np = np.array(gt_box).flatten()
                 
                 # Ensure we have exactly 4 values
                 if len(pred_box_np) != 4 or len(gt_box_np) != 4:
@@ -149,7 +173,7 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
                 false_negatives += 1
         
         # Unmatched predictions are false positives
-        false_positives += len(pred_boxes) - len(matched_preds)
+        false_positives += num_pred_boxes - len(matched_preds)
     
     # Calculate metrics
     mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else 0.0

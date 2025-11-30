@@ -226,24 +226,39 @@ def compute_and_log_metrics(model, train_loader, val_loader, device, epoch, trai
     train_metrics = None
     if compute_train_metrics:
         console.print("[yellow]🔍 Computing training metrics...[/yellow]")
-        logger.info("Computing training detection metrics (limited to 100 samples)")
-        train_metrics = compute_detection_metrics(model, train_loader, device, num_samples=100)
+        logger.info("Computing training detection metrics (limited to 50 samples)")
+        try:
+            train_metrics = compute_detection_metrics(model, train_loader, device, num_samples=50)
+        except Exception as e:
+            logger.error(f"Error computing training metrics: {e}", exc_info=True)
+            train_metrics = {
+                'mean_iou': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
+                'true_positives': 0, 'false_positives': 0, 'false_negatives': 0
+            }
         
-        console.print(f"[green]📊 Train Metrics - IoU:[/green] {train_metrics['mean_iou']:.3f} | "
-                    f"[green]Precision:[/green] {train_metrics['precision']:.3f} | "
-                    f"[green]Recall:[/green] {train_metrics['recall']:.3f} | "
-                    f"[green]F1 Score:[/green] {train_metrics['f1_score']:.3f}")
-        
-        logger.info(f"Train Metrics - IoU: {train_metrics['mean_iou']:.3f}, "
-                   f"Precision: {train_metrics['precision']:.3f}, "
-                   f"Recall: {train_metrics['recall']:.3f}, "
-                   f"F1: {train_metrics['f1_score']:.3f}")
+        if train_metrics:
+            console.print(f"[green]📊 Train Metrics - IoU:[/green] {train_metrics['mean_iou']:.3f} | "
+                        f"[green]Precision:[/green] {train_metrics['precision']:.3f} | "
+                        f"[green]Recall:[/green] {train_metrics['recall']:.3f} | "
+                        f"[green]F1 Score:[/green] {train_metrics['f1_score']:.3f}")
+            
+            logger.info(f"Train Metrics - IoU: {train_metrics['mean_iou']:.3f}, "
+                       f"Precision: {train_metrics['precision']:.3f}, "
+                       f"Recall: {train_metrics['recall']:.3f}, "
+                       f"F1: {train_metrics['f1_score']:.3f}")
     
     # Run comprehensive evaluation on validation set
     console.print("[yellow]🔍 Running validation evaluation...[/yellow]")
     logger.info("Computing comprehensive evaluation metrics on validation set")
     
-    val_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None)
+    try:
+        val_metrics = compute_detection_metrics(model, val_loader, device, num_samples=None)
+    except Exception as e:
+        logger.error(f"Error computing validation metrics: {e}", exc_info=True)
+        val_metrics = {
+            'mean_iou': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
+            'true_positives': 0, 'false_positives': 0, 'false_negatives': 0
+        }
     
     # Display both training and validation metrics together
     console.print(f"\n[bold cyan]📊 Epoch {epoch+1} Metrics Summary[/bold cyan]")
