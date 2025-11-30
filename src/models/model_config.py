@@ -85,12 +85,8 @@ MODEL_CONFIGS: Dict[str, ModelConfig] = {
             "pretrained": True,
             "model_size": "s",
             "input_size": 640,
-            "loss_weights": {"coord": 0.1, "conf": 1.5, "class": 0.8},  # Optimized loss weights
-            "use_focal_loss": False,  # Can enable for hard example mining
-            "label_smoothing": 0.0,  # Can enable (e.g., 0.1) for regularization
-            "anchor_iou_threshold": 0.5,  # IoU threshold for anchor matching
         },
-        description="YOLOv5 model with CSPDarkNet backbone and PANet (optimized hyperparameters)",
+        description="YOLOv5 model with CSPDarkNet backbone and PANet (fastest training, good accuracy)",
         supports_pretrained=True,
         variants={
             "YOLOv5-Nano": {
@@ -112,14 +108,6 @@ MODEL_CONFIGS: Dict[str, ModelConfig] = {
             "YOLOv5-XLarge": {
                 "model_size": "x",
                 "input_size": 640,
-            },
-            "YOLOv5-Focal": {
-                "model_size": "s",
-                "use_focal_loss": True,  # Enable focal loss for hard examples
-            },
-            "YOLOv5-Smooth": {
-                "model_size": "s",
-                "label_smoothing": 0.1,  # Enable label smoothing
             },
         }
     ),

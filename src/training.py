@@ -18,7 +18,7 @@ logger = logging.getLogger()
 console = Console()
 
 
-def train_epoch(model, train_loader, optimizer, device, epoch, num_epochs, wandb_api_key, batch_size, val_loader, scheduler=None):
+def train_epoch(model, train_loader, optimizer, device, epoch, num_epochs, wandb_api_key, batch_size, val_loader):
     """Train for one epoch"""
     model.train()
     train_loss = 0.0

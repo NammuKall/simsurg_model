@@ -40,8 +40,7 @@ class YOLOv5Model(nn.Module):
     """
     
     def __init__(self, num_classes=2, pretrained=True, model_size='s', input_size=640, 
-                 loss_weights=None, use_focal_loss=False, label_smoothing=0.0, 
-                 anchor_iou_threshold=0.5):
+                 loss_weights=None):
         """
         Initialize YOLOv5 model
         
@@ -58,23 +57,17 @@ class YOLOv5Model(nn.Module):
             input_size: Input image size (default: 640, YOLOv5 standard)
                         Used for validation - images should be resized to this size
             loss_weights: Dict with loss weights {'coord': float, 'conf': float, 'class': float}
-                         Default: {'coord': 0.1, 'conf': 1.5, 'class': 0.8} (optimized)
-            use_focal_loss: Whether to use focal loss for classification (default: False)
-            label_smoothing: Label smoothing factor for classification (default: 0.0)
-            anchor_iou_threshold: IoU threshold for anchor matching (default: 0.5)
+                         Default: {'coord': 0.05, 'conf': 1.0, 'class': 0.5} (YOLOv5 standard)
         """
         super(YOLOv5Model, self).__init__()
         
         self.num_classes = num_classes
         self.input_size = input_size
         self.model_size = model_size
-        self.use_focal_loss = use_focal_loss
-        self.label_smoothing = label_smoothing
-        self.anchor_iou_threshold = anchor_iou_threshold
         
-        # Set loss weights (optimized defaults for better training)
+        # Set loss weights (YOLOv5 standard defaults)
         if loss_weights is None:
-            self.loss_weights = {'coord': 0.1, 'conf': 1.5, 'class': 0.8}
+            self.loss_weights = {'coord': 0.05, 'conf': 1.0, 'class': 0.5}
         else:
             self.loss_weights = loss_weights
         
@@ -154,17 +147,15 @@ class YOLOv5Model(nn.Module):
         self.pretrained = self.pretrained if hasattr(self, 'pretrained') else True
     
     def _make_yolov5_head(self, in_channels, num_classes):
-        """Create YOLOv5 detection head with optimized convolutions"""
-        # Optimized detection head with better batch normalization momentum
-        # and improved feature extraction
+        """Create YOLOv5 detection head"""
         return nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels, momentum=0.03, eps=1e-4),  # Optimized BN params
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(in_channels),
             nn.SiLU(inplace=True),  # YOLOv5 uses SiLU activation
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels, momentum=0.03, eps=1e-4),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(in_channels),
             nn.SiLU(inplace=True),
-            nn.Conv2d(in_channels, self.num_anchors * (5 + num_classes), kernel_size=1, bias=True)
+            nn.Conv2d(in_channels, self.num_anchors * (5 + num_classes), kernel_size=1)
             # 5 = 4 bbox coords + 1 objectness, num_classes = class predictions
         )
     
@@ -430,59 +421,48 @@ class YOLOv5Model(nn.Module):
                 w_t = torch.tensor(w, device=device, dtype=torch.float32)
                 h_t = torch.tensor(h, device=device, dtype=torch.float32)
                 
-                # Improved multi-scale assignment: try all scales and pick best match
-                # This ensures objects are assigned to the scale that best predicts them
-                best_scale = 0
-                best_anchor_idx = 0
-                best_match_iou = -1.0
+                # Find best scale and anchor for this object
+                # Assign to scale based on object size (larger objects to larger scales)
+                obj_size = w * h
+                if obj_size > 0.25:  # Large objects -> scale 0
+                    best_scale = 0
+                elif obj_size > 0.0625:  # Medium objects -> scale 1
+                    best_scale = 1
+                else:  # Small objects -> scale 2
+                    best_scale = 2
                 
-                # Try all scales to find best match
-                for scale_idx in range(len(reshaped_preds)):
-                    pred = reshaped_preds[scale_idx]
-                    H, W = scale_sizes[scale_idx]
-                    
-                    # Find grid cell
-                    grid_x = int(x_center * W)
-                    grid_y = int(y_center * H)
-                    grid_x = max(0, min(W - 1, grid_x))
-                    grid_y = max(0, min(H - 1, grid_y))
-                    
-                    # Try all anchors at this scale
-                    for anchor_idx in range(self.num_anchors):
-                        anchor_pred = pred[i, grid_y, grid_x, anchor_idx, :]
-                        pred_x = torch.sigmoid(anchor_pred[0])
-                        pred_y = torch.sigmoid(anchor_pred[1])
-                        pred_w = torch.clamp(torch.exp(anchor_pred[2]), max=4.0)
-                        pred_h = torch.clamp(torch.exp(anchor_pred[3]), max=4.0)
-                        
-                        # Compute IoU-like metric for matching
-                        # Use intersection over union approximation
-                        pred_area = pred_w * pred_h
-                        gt_area = w_t * h_t
-                        intersection_w = torch.min(pred_w, w_t)
-                        intersection_h = torch.min(pred_h, h_t)
-                        intersection = intersection_w * intersection_h
-                        union = pred_area + gt_area - intersection
-                        match_iou = intersection / (union + 1e-7)
-                        
-                        # Also consider center distance
-                        center_dist = ((pred_x - x_center_t) ** 2 + (pred_y - y_center_t) ** 2) ** 0.5
-                        match_score = match_iou - center_dist * 0.5  # Penalize center distance
-                        
-                        if match_score.item() > best_match_iou:
-                            best_match_iou = match_score.item()
-                            best_scale = scale_idx
-                            best_anchor_idx = anchor_idx
-                
-                # Use best matching scale and anchor
                 pred = reshaped_preds[best_scale]
                 H, W = scale_sizes[best_scale]
                 
-                # Find grid cell again for the best scale
+                # Find grid cell
                 grid_x = int(x_center * W)
                 grid_y = int(y_center * H)
                 grid_x = max(0, min(W - 1, grid_x))
                 grid_y = max(0, min(H - 1, grid_y))
+                
+                # Find best anchor by comparing predictions
+                best_anchor_idx = 0
+                best_anchor_loss = float('inf')
+                
+                for anchor_idx in range(self.num_anchors):
+                    anchor_pred = pred[i, grid_y, grid_x, anchor_idx, :]
+                    pred_x = torch.sigmoid(anchor_pred[0])
+                    pred_y = torch.sigmoid(anchor_pred[1])
+                    # Clamp exp() to prevent numerical instability
+                    pred_w = torch.clamp(torch.exp(anchor_pred[2]), max=4.0)  # Max 4x image size
+                    pred_h = torch.clamp(torch.exp(anchor_pred[3]), max=4.0)
+                    
+                    # Compute coordinate loss for this anchor
+                    anchor_loss = (
+                        (pred_x - x_center_t) ** 2 +
+                        (pred_y - y_center_t) ** 2 +
+                        (pred_w - w_t) ** 2 +
+                        (pred_h - h_t) ** 2
+                    ).sum()
+                    
+                    if anchor_loss.item() < best_anchor_loss:
+                        best_anchor_loss = anchor_loss.item()
+                        best_anchor_idx = anchor_idx
                 
                 # Use best matching anchor
                 anchor_pred = pred[i, grid_y, grid_x, best_anchor_idx, :]
@@ -500,53 +480,19 @@ class YOLOv5Model(nn.Module):
                 coord_losses.append((pred_w - w_t) ** 2)
                 coord_losses.append((pred_h - h_t) ** 2)
                 
-                # Confidence loss (positive example) - use focal loss if enabled
-                conf_target = torch.tensor(1.0, device=device)
-                if self.use_focal_loss:
-                    # Focal loss for hard example mining
-                    conf_logit = anchor_pred[4]
-                    conf_prob = torch.sigmoid(conf_logit)
-                    alpha = 0.25
-                    gamma = 2.0
-                    focal_weight = alpha * (1 - conf_prob) ** gamma
-                    conf_loss = F.binary_cross_entropy_with_logits(
-                        conf_logit, conf_target, reduction='none'
-                    ) * focal_weight
-                    conf_losses.append(conf_loss)
-                else:
-                    conf_losses.append(F.binary_cross_entropy_with_logits(
-                        anchor_pred[4], conf_target
-                    ))
+                # Confidence loss (positive example)
+                conf_losses.append(F.binary_cross_entropy_with_logits(
+                    anchor_pred[4],
+                    torch.tensor(1.0, device=device)
+                ))
                 
-                # Classification loss with optional label smoothing
+                # Classification loss
                 label_idx = int(label.item()) - 1
                 label_idx = max(0, min(self.num_classes - 1, label_idx))
-                
-                if self.label_smoothing > 0:
-                    # Label smoothing: convert hard label to soft label
-                    target = torch.zeros(self.num_classes, device=device)
-                    target[label_idx] = 1.0 - self.label_smoothing
-                    target += self.label_smoothing / self.num_classes
-                    class_loss = F.cross_entropy(
-                        pred_classes.unsqueeze(0),
-                        target.unsqueeze(0),
-                        reduction='mean'
-                    )
-                else:
-                    class_loss = F.cross_entropy(
-                        pred_classes.unsqueeze(0),
-                        torch.tensor([label_idx], device=device, dtype=torch.long)
-                    )
-                
-                if self.use_focal_loss:
-                    # Focal loss for classification
-                    class_probs = F.softmax(pred_classes, dim=-1)
-                    alpha = 0.25
-                    gamma = 2.0
-                    focal_weight = alpha * (1 - class_probs[0, label_idx]) ** gamma
-                    class_loss = class_loss * focal_weight
-                
-                class_losses.append(class_loss)
+                class_losses.append(F.cross_entropy(
+                    pred_classes.unsqueeze(0),
+                    torch.tensor([label_idx], device=device, dtype=torch.long)
+                ))
         
         # Combine losses
         if coord_losses:
@@ -555,15 +501,14 @@ class YOLOv5Model(nn.Module):
             total_class_loss = torch.stack(class_losses).sum()
             num_objects = len(conf_losses)
             
-            # Normalize by number of positive objects
             total_loss = (
                 self.loss_weights['coord'] * total_coord_loss +
                 self.loss_weights['conf'] * total_conf_loss +
                 self.loss_weights['class'] * total_class_loss
-            ) / max(num_objects, 1)  # Avoid division by zero
+            ) / num_objects
         else:
-            # If no objects, return small loss to encourage learning
-            total_loss = torch.tensor(0.1, device=device, requires_grad=True)
+            # If no objects, return small loss
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         
         return total_loss
     
