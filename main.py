@@ -133,6 +133,7 @@ def initialize_wandb():
     
     if wandb_api_key:
         model_name = os.getenv("MODEL_NAME", "EfficientDet")
+        model_variant = os.getenv("MODEL_VARIANT", None)
         wandb.init(
             project=os.getenv("WANDB_PROJECT", "simsurg-model"),
             entity=os.getenv("WANDB_ENTITY"),
@@ -142,7 +143,7 @@ def initialize_wandb():
                 "batch_size": int(os.getenv("BATCH_SIZE", "4")),
                 "num_epochs": int(os.getenv("NUM_EPOCHS", "10")),
                 "model": model_name,
-                "model_variant": os.getenv("MODEL_VARIANT", None),
+                "model_variant": model_variant if model_variant else "default",
                 "dataset": "SimSurgSkill",
                 "num_classes": 2,
                 "optimizer": "Adam",
@@ -281,7 +282,6 @@ def setup_device_and_model(wandb_api_key):
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
             "model_architecture": model_name,
-            "model_variant": model_variant if model_variant else "default",
             "model_class": model_info.get('class', 'N/A')
         })
     
