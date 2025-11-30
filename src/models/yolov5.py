@@ -20,15 +20,27 @@ except ImportError:
 
 # Import torchvision models for custom implementation
 from torchvision import models
+from torchvision.ops import nms
 
 
 class YOLOv5Model(nn.Module):
     """
     YOLOv5 model wrapper for SimSurgSkill dataset
     Uses CSPDarkNet backbone with PANet neck and YOLOv5 detection heads
+    
+    Backend Selection:
+    - If ultralytics package is available: Uses ultralytics YOLOv5 for inference
+      (training falls back to custom implementation)
+    - If ultralytics not available: Uses custom PyTorch implementation
+      (ResNet-based backbone with YOLOv5-style detection heads)
+    
+    Note: Custom implementation is always used for training as ultralytics
+    training requires different target formatting. For best results, use
+    custom implementation (set pretrained=False or ensure ultralytics unavailable).
     """
     
-    def __init__(self, num_classes=2, pretrained=True, model_size='s', input_size=640):
+    def __init__(self, num_classes=2, pretrained=True, model_size='s', input_size=640, 
+                 loss_weights=None):
         """
         Initialize YOLOv5 model
         
@@ -43,6 +55,9 @@ class YOLOv5Model(nn.Module):
                        - 'l': large
                        - 'x': xlarge (slowest, most accurate)
             input_size: Input image size (default: 640, YOLOv5 standard)
+                        Used for validation - images should be resized to this size
+            loss_weights: Dict with loss weights {'coord': float, 'conf': float, 'class': float}
+                         Default: {'coord': 0.05, 'conf': 1.0, 'class': 0.5} (YOLOv5 standard)
         """
         super(YOLOv5Model, self).__init__()
         
@@ -50,12 +65,28 @@ class YOLOv5Model(nn.Module):
         self.input_size = input_size
         self.model_size = model_size
         
+        # Set loss weights (YOLOv5 defaults)
+        if loss_weights is None:
+            self.loss_weights = {'coord': 0.05, 'conf': 1.0, 'class': 0.5}
+        else:
+            self.loss_weights = loss_weights
+        
         # Try to use ultralytics YOLOv5 if available, otherwise use custom implementation
         if ULTRALYTICS_AVAILABLE:
             self.use_ultralytics = True
-            # Note: ultralytics YOLO needs to be initialized differently
-            # We'll handle this in forward pass
-            self._ultralytics_model = None
+            # Initialize ultralytics model in __init__ for better device handling
+            try:
+                model_name = f'yolov5{self.model_size}.pt'
+                self._ultralytics_model = YOLO(model_name)
+                # Modify number of classes
+                self._ultralytics_model.model.nc = self.num_classes
+            except Exception as e:
+                # Fallback to custom if ultralytics init fails
+                import warnings
+                warnings.warn(f"Failed to initialize ultralytics YOLOv5: {e}. Using custom implementation.")
+                self.use_ultralytics = False
+                self.pretrained = pretrained
+                self._build_custom_yolov5()
         else:
             self.use_ultralytics = False
             # Use custom YOLOv5 implementation
@@ -102,9 +133,15 @@ class YOLOv5Model(nn.Module):
         self.downsample1 = nn.Conv2d(backbone_channels[2], backbone_channels[2], kernel_size=3, stride=2, padding=1)
         self.downsample2 = nn.Conv2d(backbone_channels[1], backbone_channels[1], kernel_size=3, stride=2, padding=1)
         
-        # Feature fusion
+        # Feature fusion for top-down path
         self.fusion1 = nn.Conv2d(backbone_channels[3] + backbone_channels[2], backbone_channels[2], kernel_size=1)
         self.fusion2 = nn.Conv2d(backbone_channels[2] + backbone_channels[1], backbone_channels[1], kernel_size=1)
+        
+        # Feature fusion for bottom-up path
+        # p4_bottom: medium_features (channels[2]) + downsampled_p3 (channels[1]) -> channels[2]
+        self.fusion3 = nn.Conv2d(backbone_channels[2] + backbone_channels[1], backbone_channels[2], kernel_size=1)
+        # p5_bottom: large_features (channels[3]) + downsampled_p4 (channels[2]) -> channels[3]
+        self.fusion4 = nn.Conv2d(backbone_channels[3] + backbone_channels[2], backbone_channels[3], kernel_size=1)
         
         # Store pretrained flag
         self.pretrained = self.pretrained if hasattr(self, 'pretrained') else True
@@ -141,36 +178,52 @@ class YOLOv5Model(nn.Module):
     
     def _forward_ultralytics(self, x, targets=None):
         """Forward pass using ultralytics YOLOv5"""
-        # Initialize model if not already done
+        # Ensure model is initialized (should be done in __init__, but check for safety)
         if self._ultralytics_model is None:
-            model_name = f'yolov5{self.model_size}.pt'
-            self._ultralytics_model = YOLO(model_name)
-            # Modify number of classes
-            self._ultralytics_model.model.nc = self.num_classes
+            try:
+                model_name = f'yolov5{self.model_size}.pt'
+                self._ultralytics_model = YOLO(model_name)
+                self._ultralytics_model.model.nc = self.num_classes
+            except Exception as e:
+                # Fallback to custom implementation
+                import warnings
+                warnings.warn(f"Failed to initialize ultralytics YOLOv5: {e}. Using custom implementation.")
+                self.use_ultralytics = False
+                if not hasattr(self, 'backbone_conv1'):
+                    self.pretrained = True
+                    self._build_custom_yolov5()
+                return self._forward_custom(x, targets)
+        
+        # Get device from input tensor
+        device = x.device if isinstance(x, torch.Tensor) else torch.device('cpu')
         
         # Convert input format
         if isinstance(x, torch.Tensor):
-            # Convert tensor to numpy and handle batch
+            # Check if images are normalized [0,1] or [0,255]
+            # Assume normalized [0,1] if max value <= 1.0
+            max_val = x.max().item()
             images = []
             for i in range(x.shape[0]):
                 img = x[i].cpu().numpy().transpose(1, 2, 0)
-                img = (img * 255).astype('uint8')
+                if max_val <= 1.0:
+                    # Images are normalized [0,1], convert to [0,255]
+                    img = (img * 255).astype('uint8')
+                else:
+                    # Images are already [0,255], just convert type
+                    img = img.astype('uint8')
                 images.append(img)
         else:
             images = x
         
         if targets is not None:
-            # Training mode
-            # Note: ultralytics YOLO expects different format
-            # For training, we should use custom implementation or format targets properly
-            # For now, warn and use custom implementation fallback
+            # Training mode - ultralytics YOLO training requires different format
+            # Fall back to custom implementation for training
             import warnings
             warnings.warn(
                 "Ultralytics YOLOv5 training mode not fully implemented. "
-                "Consider using custom implementation (set pretrained=False) or implement proper target formatting.",
+                "Using custom implementation for training.",
                 UserWarning
             )
-            # Fall back to custom implementation for training
             self.use_ultralytics = False
             if not hasattr(self, 'backbone_conv1'):
                 self.pretrained = True
@@ -180,7 +233,7 @@ class YOLOv5Model(nn.Module):
             # Inference mode
             results = self._ultralytics_model(images)
             
-            # Convert to our format
+            # Convert to our format with proper device handling
             formatted_results = []
             for result in results:
                 boxes = []
@@ -195,70 +248,101 @@ class YOLOv5Model(nn.Module):
                         labels.append(int(box.cls.item()) + 1)  # Convert to 1-indexed
                 
                 formatted_results.append({
-                    'boxes': torch.tensor(boxes, device=x.device) if boxes else torch.zeros((0, 4), device=x.device),
-                    'scores': torch.tensor(scores, device=x.device) if scores else torch.zeros(0, device=x.device),
-                    'labels': torch.tensor(labels, device=x.device, dtype=torch.long) if labels else torch.zeros(0, dtype=torch.long, device=x.device)
+                    'boxes': torch.tensor(boxes, device=device) if boxes else torch.zeros((0, 4), device=device),
+                    'scores': torch.tensor(scores, device=device) if scores else torch.zeros(0, device=device),
+                    'labels': torch.tensor(labels, device=device, dtype=torch.long) if labels else torch.zeros(0, dtype=torch.long, device=device)
                 })
             
             return formatted_results
     
     def _forward_custom(self, x, targets=None):
         """Forward pass using custom YOLOv5 implementation"""
-        batch_size = x.shape[0]
-        
-        # Store input image size for loss computation and postprocessing
-        input_img_size = (x.shape[2], x.shape[3])  # (H, W)
-        
-        # Extract features from backbone
-        x = self.backbone_conv1(x)
-        x = self.backbone_bn1(x)
-        x = self.backbone_relu(x)
-        x = self.backbone_maxpool(x)
-        
-        x = self.backbone_layer1(x)   # stride 4
-        small_features = self.backbone_layer2(x)  # stride 8
-        medium_features = self.backbone_layer3(small_features)  # stride 16
-        large_features = self.backbone_layer4(medium_features)  # stride 32
-        
-        # YOLOv5 PANet feature pyramid
-        # Top-down path
-        p5 = large_features
-        
-        # Upsample p5 to match medium_features spatial dimensions exactly
-        upsampled_p5 = F.interpolate(p5, size=medium_features.shape[2:], mode='nearest', align_corners=None)
-        p4 = torch.cat([upsampled_p5, medium_features], dim=1)
-        p4 = self.fusion1(p4)
-        
-        # Upsample p4 to match small_features spatial dimensions exactly
-        upsampled_p4 = F.interpolate(p4, size=small_features.shape[2:], mode='nearest', align_corners=None)
-        p3 = torch.cat([upsampled_p4, small_features], dim=1)
-        p3 = self.fusion2(p3)
-        
-        # Bottom-up path (for better feature fusion)
-        # Downsample p3 to match medium_features spatial dimensions exactly
-        downsampled_p3 = F.interpolate(p3, size=medium_features.shape[2:], mode='nearest', align_corners=None)
-        p4_bottom = torch.cat([medium_features, downsampled_p3], dim=1)
-        
-        # Downsample p4 to match large_features spatial dimensions exactly
-        downsampled_p4 = F.interpolate(p4, size=large_features.shape[2:], mode='nearest', align_corners=None)
-        p5_bottom = torch.cat([large_features, downsampled_p4], dim=1)
-        
-        # Detection at 3 scales
-        scale1_out = self.detect_scale1(p5_bottom)  # Large objects
-        scale2_out = self.detect_scale2(p4_bottom)  # Medium objects
-        scale3_out = self.detect_scale3(p3)  # Small objects
-        
-        if targets is not None:
-            # Training mode: compute loss
-            loss = self.compute_loss([scale1_out, scale2_out, scale3_out], targets, input_img_size)
-            return {'loss': loss}
-        else:
-            # Inference mode: return predictions
-            return self.postprocess_predictions([scale1_out, scale2_out, scale3_out], input_img_size)
+        try:
+            # Validate input
+            if not isinstance(x, torch.Tensor):
+                raise TypeError(f"Expected torch.Tensor, got {type(x)}")
+            if x.dim() != 4:
+                raise ValueError(f"Expected 4D tensor [B, C, H, W], got {x.dim()}D tensor")
+            if x.shape[1] != 3:
+                raise ValueError(f"Expected 3 channels, got {x.shape[1]} channels")
+            
+            batch_size = x.shape[0]
+            
+            # Store input image size for loss computation and postprocessing
+            input_img_size = (x.shape[2], x.shape[3])  # (H, W)
+            
+            # Validate input_size parameter if set (warn if mismatch)
+            if self.input_size > 0:
+                expected_size = self.input_size
+                actual_size = max(input_img_size)
+                if abs(actual_size - expected_size) > 10:  # Allow 10px tolerance
+                    import warnings
+                    warnings.warn(
+                        f"Input size mismatch: model expects ~{expected_size}px, "
+                        f"got {actual_size}px. This may affect performance.",
+                        UserWarning
+                    )
+            
+            # Extract features from backbone
+            x = self.backbone_conv1(x)
+            x = self.backbone_bn1(x)
+            x = self.backbone_relu(x)
+            x = self.backbone_maxpool(x)
+            
+            x = self.backbone_layer1(x)   # stride 4
+            small_features = self.backbone_layer2(x)  # stride 8
+            medium_features = self.backbone_layer3(small_features)  # stride 16
+            large_features = self.backbone_layer4(medium_features)  # stride 32
+            
+            # YOLOv5 PANet feature pyramid
+            # Top-down path
+            p5 = large_features
+            
+            # Upsample p5 to match medium_features spatial dimensions exactly
+            upsampled_p5 = F.interpolate(p5, size=medium_features.shape[2:], mode='nearest', align_corners=None)
+            p4 = torch.cat([upsampled_p5, medium_features], dim=1)
+            p4 = self.fusion1(p4)
+            
+            # Upsample p4 to match small_features spatial dimensions exactly
+            upsampled_p4 = F.interpolate(p4, size=small_features.shape[2:], mode='nearest', align_corners=None)
+            p3 = torch.cat([upsampled_p4, small_features], dim=1)
+            p3 = self.fusion2(p3)
+            
+            # Bottom-up path (for better feature fusion)
+            # Downsample p3 to match medium_features spatial dimensions exactly
+            downsampled_p3 = F.interpolate(p3, size=medium_features.shape[2:], mode='nearest', align_corners=None)
+            p4_bottom = torch.cat([medium_features, downsampled_p3], dim=1)
+            p4_bottom = self.fusion3(p4_bottom)  # Fuse to match detection head input channels
+            
+            # Downsample p4 to match large_features spatial dimensions exactly
+            downsampled_p4 = F.interpolate(p4, size=large_features.shape[2:], mode='nearest', align_corners=None)
+            p5_bottom = torch.cat([large_features, downsampled_p4], dim=1)
+            p5_bottom = self.fusion4(p5_bottom)  # Fuse to match detection head input channels
+            
+            # Detection at 3 scales
+            scale1_out = self.detect_scale1(p5_bottom)  # Large objects
+            scale2_out = self.detect_scale2(p4_bottom)  # Medium objects
+            scale3_out = self.detect_scale3(p3)  # Small objects
+            
+            if targets is not None:
+                # Training mode: compute loss
+                # Validate targets
+                if not isinstance(targets, (list, tuple)):
+                    raise TypeError(f"Expected list/tuple of targets, got {type(targets)}")
+                if len(targets) != batch_size:
+                    raise ValueError(f"Targets length {len(targets)} doesn't match batch size {batch_size}")
+                
+                loss = self.compute_loss([scale1_out, scale2_out, scale3_out], targets, input_img_size)
+                return {'loss': loss}
+            else:
+                # Inference mode: return predictions
+                return self.postprocess_predictions([scale1_out, scale2_out, scale3_out], input_img_size)
+        except Exception as e:
+            raise RuntimeError(f"Error in YOLOv5 custom forward pass: {e}") from e
     
     def compute_loss(self, predictions, targets, img_size):
         """
-        Compute YOLOv5 loss (simplified version)
+        Compute YOLOv5 loss - assigns each object to best matching scale and anchor
         
         Args:
             predictions: List of 3 prediction tensors (one per scale)
@@ -266,26 +350,38 @@ class YOLOv5Model(nn.Module):
             img_size: Image size (H, W)
         """
         device = predictions[0].device
-        total_loss = torch.tensor(0.0, device=device)
         
+        # Validate batch sizes match
         batch_size = len(targets)
+        for pred in predictions:
+            if pred.shape[0] != batch_size:
+                raise ValueError(f"Batch size mismatch: targets has {batch_size}, but prediction has {pred.shape[0]}")
         
-        # Use medium scale for simplified loss computation
-        pred = predictions[1]
-        B, _, H, W = pred.shape
+        # Handle empty batch
+        if batch_size == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
         
-        # Reshape prediction
-        pred = pred.view(B, self.num_anchors, 5 + self.num_classes, H, W)
-        pred = pred.permute(0, 3, 4, 1, 2).contiguous()
+        # Reshape all predictions once
+        reshaped_preds = []
+        scale_sizes = []  # Store (H, W) for each scale
+        for pred in predictions:
+            B, _, H, W = pred.shape
+            scale_sizes.append((H, W))
+            pred_reshaped = pred.view(B, self.num_anchors, 5 + self.num_classes, H, W)
+            pred_reshaped = pred_reshaped.permute(0, 3, 4, 1, 2).contiguous()
+            reshaped_preds.append(pred_reshaped)
         
-        coord_loss = torch.tensor(0.0, device=device)
-        conf_loss = torch.tensor(0.0, device=device)
-        class_loss = torch.tensor(0.0, device=device)
+        # Collect all losses
+        coord_losses = []
+        conf_losses = []
+        class_losses = []
         
+        # Process each image in batch
         for i in range(batch_size):
             gt_boxes = targets[i]['boxes']
             gt_labels = targets[i]['labels']
             
+            # Handle empty boxes
             if len(gt_boxes) == 0:
                 continue
             
@@ -296,131 +392,229 @@ class YOLOv5Model(nn.Module):
                 w = (box[2] - box[0]) / img_size[1]
                 h = (box[3] - box[1]) / img_size[0]
                 
+                # Clamp normalized coordinates
+                x_center = max(0.0, min(1.0, x_center))
+                y_center = max(0.0, min(1.0, y_center))
+                w = max(0.001, min(1.0, w))
+                h = max(0.001, min(1.0, h))
+                
+                # Convert to tensors for vectorized operations
+                x_center_t = torch.tensor(x_center, device=device)
+                y_center_t = torch.tensor(y_center, device=device)
+                w_t = torch.tensor(w, device=device)
+                h_t = torch.tensor(h, device=device)
+                
+                # Find best scale and anchor for this object
+                # Assign to scale based on object size (larger objects to larger scales)
+                obj_size = w * h
+                if obj_size > 0.25:  # Large objects -> scale 0
+                    best_scale = 0
+                elif obj_size > 0.0625:  # Medium objects -> scale 1
+                    best_scale = 1
+                else:  # Small objects -> scale 2
+                    best_scale = 2
+                
+                pred = reshaped_preds[best_scale]
+                H, W = scale_sizes[best_scale]
+                
                 # Find grid cell
                 grid_x = int(x_center * W)
                 grid_y = int(y_center * H)
                 grid_x = max(0, min(W - 1, grid_x))
                 grid_y = max(0, min(H - 1, grid_y))
                 
-                # Get predictions for this grid cell (use first anchor)
-                anchor_pred = pred[i, grid_y, grid_x, 0, :]
+                # Find best anchor by comparing predictions
+                best_anchor_idx = 0
+                best_anchor_loss = float('inf')
                 
-                # Extract components
+                for anchor_idx in range(self.num_anchors):
+                    anchor_pred = pred[i, grid_y, grid_x, anchor_idx, :]
+                    pred_x = torch.sigmoid(anchor_pred[0])
+                    pred_y = torch.sigmoid(anchor_pred[1])
+                    # Clamp exp() to prevent numerical instability
+                    pred_w = torch.clamp(torch.exp(anchor_pred[2]), max=4.0)  # Max 4x image size
+                    pred_h = torch.clamp(torch.exp(anchor_pred[3]), max=4.0)
+                    
+                    # Compute coordinate loss for this anchor
+                    anchor_loss = (
+                        (pred_x - x_center_t) ** 2 +
+                        (pred_y - y_center_t) ** 2 +
+                        (pred_w - w_t) ** 2 +
+                        (pred_h - h_t) ** 2
+                    ).sum()
+                    
+                    if anchor_loss.item() < best_anchor_loss:
+                        best_anchor_loss = anchor_loss.item()
+                        best_anchor_idx = anchor_idx
+                
+                # Use best matching anchor
+                anchor_pred = pred[i, grid_y, grid_x, best_anchor_idx, :]
+                
+                # Extract and compute losses
                 pred_x = torch.sigmoid(anchor_pred[0])
                 pred_y = torch.sigmoid(anchor_pred[1])
-                # Apply exp() to ensure positive width/height (YOLOv5 style)
-                pred_w = torch.exp(anchor_pred[2])
-                pred_h = torch.exp(anchor_pred[3])
-                pred_conf = torch.sigmoid(anchor_pred[4])
+                pred_w = torch.clamp(torch.exp(anchor_pred[2]), max=4.0)
+                pred_h = torch.clamp(torch.exp(anchor_pred[3]), max=4.0)
                 pred_classes = anchor_pred[5:]
                 
-                # Compute losses
-                coord_loss += F.mse_loss(pred_x, torch.tensor(x_center, device=device))
-                coord_loss += F.mse_loss(pred_y, torch.tensor(y_center, device=device))
-                coord_loss += F.mse_loss(pred_w, torch.tensor(w, device=device))
-                coord_loss += F.mse_loss(pred_h, torch.tensor(h, device=device))
+                # Coordinate losses
+                coord_losses.append((pred_x - x_center_t) ** 2)
+                coord_losses.append((pred_y - y_center_t) ** 2)
+                coord_losses.append((pred_w - w_t) ** 2)
+                coord_losses.append((pred_h - h_t) ** 2)
                 
-                # Confidence loss
-                conf_loss += F.binary_cross_entropy_with_logits(
+                # Confidence loss (positive example)
+                conf_losses.append(F.binary_cross_entropy_with_logits(
                     anchor_pred[4],
                     torch.tensor(1.0, device=device)
-                )
+                ))
                 
                 # Classification loss
                 label_idx = int(label.item()) - 1
                 label_idx = max(0, min(self.num_classes - 1, label_idx))
-                class_loss += F.cross_entropy(
+                class_losses.append(F.cross_entropy(
                     pred_classes.unsqueeze(0),
                     torch.tensor([label_idx], device=device, dtype=torch.long)
-                )
+                ))
         
-        # Combine losses with YOLOv5 weighting
-        # Normalize by number of objects, not batch size
-        num_objects = sum(len(targets[i]['boxes']) for i in range(batch_size) if len(targets[i]['boxes']) > 0)
-        if num_objects > 0:
-            total_loss = (0.05 * coord_loss + conf_loss + 0.5 * class_loss) / num_objects
+        # Combine losses
+        if coord_losses:
+            total_coord_loss = torch.stack(coord_losses).sum()
+            total_conf_loss = torch.stack(conf_losses).sum()
+            total_class_loss = torch.stack(class_losses).sum()
+            num_objects = len(conf_losses)
+            
+            total_loss = (
+                self.loss_weights['coord'] * total_coord_loss +
+                self.loss_weights['conf'] * total_conf_loss +
+                self.loss_weights['class'] * total_class_loss
+            ) / num_objects
         else:
-            # If no objects, return small loss to avoid division by zero
+            # If no objects, return small loss
             total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        
         return total_loss
     
-    def postprocess_predictions(self, predictions, img_size, score_threshold=0.25):
+    def postprocess_predictions(self, predictions, img_size, score_threshold=0.25, nms_threshold=0.45):
         """
-        Convert raw YOLOv5 predictions to final detections
+        Convert raw YOLOv5 predictions to final detections with NMS
         
         Args:
             predictions: List of 3 prediction tensors (one per scale)
             img_size: Image size (H, W)
             score_threshold: Confidence threshold (YOLOv5 default: 0.25)
+            nms_threshold: IoU threshold for NMS (YOLOv5 default: 0.45)
         
         Returns:
             List of dicts with 'boxes', 'scores', 'labels' for each image in batch
         """
+        # Validate batch sizes match across scales
         batch_size = predictions[0].shape[0]
+        for pred in predictions[1:]:
+            if pred.shape[0] != batch_size:
+                raise ValueError(f"Batch size mismatch: scale 0 has {batch_size}, but other scale has {pred.shape[0]}")
+        
         results = []
         
-        # Use medium scale predictions
-        pred = predictions[1]
-        B, _, H, W = pred.shape
+        # Process all scales and combine predictions
+        all_boxes = []
+        all_scores = []
+        all_labels = []
         
-        # Reshape
-        pred = pred.view(B, self.num_anchors, 5 + self.num_classes, H, W)
-        pred = pred.permute(0, 3, 4, 1, 2).contiguous()
-        
-        for i in range(batch_size):
-            boxes = []
-            scores = []
-            labels = []
+        for scale_idx, pred in enumerate(predictions):
+            B, _, H, W = pred.shape
             
-            # Process each grid cell
-            for grid_y in range(H):
-                for grid_x in range(W):
-                    for anchor_idx in range(self.num_anchors):
-                        anchor_pred = pred[i, grid_y, grid_x, anchor_idx, :]
-                        
-                        # Extract components
-                        x_center = torch.sigmoid(anchor_pred[0]).item()
-                        y_center = torch.sigmoid(anchor_pred[1]).item()
-                        # Apply exp() to ensure positive width/height (YOLOv5 style)
-                        w = torch.exp(anchor_pred[2]).item()
-                        h = torch.exp(anchor_pred[3]).item()
-                        conf = torch.sigmoid(anchor_pred[4]).item()
-                        
-                        # Get class predictions
-                        class_logits = anchor_pred[5:]
-                        class_probs = F.softmax(class_logits, dim=0)
-                        class_score, class_idx = class_probs.max(0)
-                        
-                        # Final score = confidence * class_probability
-                        final_score = conf * class_score.item()
-                        
-                        if final_score > score_threshold:
-                            # Convert to absolute coordinates
-                            # Clamp coordinates to ensure valid boxes
-                            x_min = max(0, (x_center - w / 2) * img_size[1])
-                            y_min = max(0, (y_center - h / 2) * img_size[0])
-                            x_max = min(img_size[1], (x_center + w / 2) * img_size[1])
-                            y_max = min(img_size[0], (y_center + h / 2) * img_size[0])
+            # Reshape
+            pred = pred.view(B, self.num_anchors, 5 + self.num_classes, H, W)
+            pred = pred.permute(0, 3, 4, 1, 2).contiguous()
+            
+            for i in range(batch_size):
+                if i >= len(all_boxes):
+                    all_boxes.append([])
+                    all_scores.append([])
+                    all_labels.append([])
+                
+                # Process each grid cell
+                for grid_y in range(H):
+                    for grid_x in range(W):
+                        for anchor_idx in range(self.num_anchors):
+                            anchor_pred = pred[i, grid_y, grid_x, anchor_idx, :]
                             
-                            # Ensure valid box (x_min < x_max, y_min < y_max)
-                            if x_max > x_min and y_max > y_min:
+                            # Extract components
+                            x_center = torch.sigmoid(anchor_pred[0]).item()
+                            y_center = torch.sigmoid(anchor_pred[1]).item()
+                            # Apply exp() and clamp to prevent numerical instability
+                            w = torch.clamp(torch.exp(anchor_pred[2]), max=4.0).item()
+                            h = torch.clamp(torch.exp(anchor_pred[3]), max=4.0).item()
+                            conf = torch.sigmoid(anchor_pred[4]).item()
                             
-                                boxes.append([x_min, y_min, x_max, y_max])
-                                scores.append(final_score)
-                                labels.append(int(class_idx.item()) + 1)  # Convert to 1-indexed
+                            # Get class predictions
+                            class_logits = anchor_pred[5:]
+                            class_probs = F.softmax(class_logits, dim=0)
+                            class_score, class_idx = class_probs.max(0)
+                            
+                            # Final score = confidence * class_probability
+                            final_score = conf * class_score.item()
+                            
+                            if final_score > score_threshold:
+                                # Convert to absolute coordinates
+                                # Clamp coordinates to ensure valid boxes
+                                x_min = max(0, (x_center - w / 2) * img_size[1])
+                                y_min = max(0, (y_center - h / 2) * img_size[0])
+                                x_max = min(img_size[1], (x_center + w / 2) * img_size[1])
+                                y_max = min(img_size[0], (y_center + h / 2) * img_size[0])
+                                
+                                # Ensure valid box (x_min < x_max, y_min < y_max) and positive dimensions
+                                if x_max > x_min and y_max > y_min and w > 0 and h > 0:
+                                    all_boxes[i].append([x_min, y_min, x_max, y_max])
+                                    all_scores[i].append(final_score)
+                                    all_labels[i].append(int(class_idx.item()) + 1)  # Convert to 1-indexed
+        
+        # Apply NMS per image
+        device = predictions[0].device
+        for i in range(batch_size):
+            if len(all_boxes[i]) == 0:
+                results.append({
+                    'boxes': torch.zeros((0, 4), device=device),
+                    'scores': torch.zeros(0, device=device),
+                    'labels': torch.zeros(0, dtype=torch.long, device=device)
+                })
+                continue
             
             # Convert to tensors
-            if boxes:
+            boxes_tensor = torch.tensor(all_boxes[i], device=device)
+            scores_tensor = torch.tensor(all_scores[i], device=device)
+            labels_tensor = torch.tensor(all_labels[i], device=device, dtype=torch.long)
+            
+            # Apply NMS per class
+            keep_indices = []
+            unique_labels = torch.unique(labels_tensor)
+            
+            for label in unique_labels:
+                label_mask = labels_tensor == label
+                if label_mask.sum() == 0:
+                    continue
+                
+                label_boxes = boxes_tensor[label_mask]
+                label_scores = scores_tensor[label_mask]
+                label_indices = torch.where(label_mask)[0]
+                
+                # Apply NMS
+                keep = nms(label_boxes, label_scores, nms_threshold)
+                keep_indices.extend(label_indices[keep].tolist())
+            
+            if keep_indices:
+                keep_indices = torch.tensor(keep_indices, device=device)
                 results.append({
-                    'boxes': torch.tensor(boxes, device=pred.device),
-                    'scores': torch.tensor(scores, device=pred.device),
-                    'labels': torch.tensor(labels, device=pred.device)
+                    'boxes': boxes_tensor[keep_indices],
+                    'scores': scores_tensor[keep_indices],
+                    'labels': labels_tensor[keep_indices]
                 })
             else:
                 results.append({
-                    'boxes': torch.zeros((0, 4), device=pred.device),
-                    'scores': torch.zeros(0, device=pred.device),
-                    'labels': torch.zeros(0, dtype=torch.long, device=pred.device)
+                    'boxes': torch.zeros((0, 4), device=device),
+                    'scores': torch.zeros(0, device=device),
+                    'labels': torch.zeros(0, dtype=torch.long, device=device)
                 })
         
         return results
@@ -442,7 +636,17 @@ class YOLOv5Model(nn.Module):
     def to(self, device):
         """Move model to device"""
         super().to(device)
-        if self.use_ultralytics and self._ultralytics_model:
-            self._ultralytics_model.to(device)
+        if self.use_ultralytics and self._ultralytics_model is not None:
+            try:
+                # Move ultralytics model to device
+                if hasattr(self._ultralytics_model, 'to'):
+                    self._ultralytics_model.to(device)
+                elif hasattr(self._ultralytics_model, 'model'):
+                    # Try to move underlying model
+                    if hasattr(self._ultralytics_model.model, 'to'):
+                        self._ultralytics_model.model.to(device)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Could not move ultralytics model to device {device}: {e}")
         return self
 
