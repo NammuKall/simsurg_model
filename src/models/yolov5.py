@@ -388,17 +388,26 @@ class YOLOv5Model(nn.Module):
                 continue
             
             for box_idx, (box, label) in enumerate(zip(gt_boxes, gt_labels)):
-                # Normalize box coordinates (ensure they're tensors first)
+                # Validate box coordinates
                 if isinstance(box, torch.Tensor):
-                    x_center = ((box[0] + box[2]) / 2.0 / img_size[1]).item()
-                    y_center = ((box[1] + box[3]) / 2.0 / img_size[0]).item()
-                    w = ((box[2] - box[0]) / img_size[1]).item()
-                    h = ((box[3] - box[1]) / img_size[0]).item()
+                    if box.numel() < 4:
+                        continue
+                    box_vals = box.cpu().numpy() if box.is_cuda else box.numpy()
+                    x_min, y_min, x_max, y_max = box_vals[0], box_vals[1], box_vals[2], box_vals[3]
                 else:
-                    x_center = (box[0] + box[2]) / 2.0 / img_size[1]
-                    y_center = (box[1] + box[3]) / 2.0 / img_size[0]
-                    w = (box[2] - box[0]) / img_size[1]
-                    h = (box[3] - box[1]) / img_size[0]
+                    if len(box) < 4:
+                        continue
+                    x_min, y_min, x_max, y_max = box[0], box[1], box[2], box[3]
+                
+                # Validate box is valid
+                if x_max <= x_min or y_max <= y_min or x_min < 0 or y_min < 0:
+                    continue
+                
+                # Normalize box coordinates
+                x_center = (x_min + x_max) / 2.0 / img_size[1]
+                y_center = (y_min + y_max) / 2.0 / img_size[0]
+                w = (x_max - x_min) / img_size[1]
+                h = (y_max - y_min) / img_size[0]
                 
                 # Clamp normalized coordinates (now Python floats)
                 x_center = max(0.0, min(1.0, x_center))
@@ -559,17 +568,6 @@ class YOLOv5Model(nn.Module):
                 # Final scores: [H, W, anchors]
                 final_scores = conf * class_scores
                 
-                # Create grid coordinates
-                grid_y, grid_x = torch.meshgrid(
-                    torch.arange(H, device=device, dtype=torch.float32),
-                    torch.arange(W, device=device, dtype=torch.float32),
-                    indexing='ij'
-                )
-                
-                # Expand for anchors: [H, W, anchors]
-                grid_x = grid_x.unsqueeze(-1).expand(-1, -1, self.num_anchors)
-                grid_y = grid_y.unsqueeze(-1).expand(-1, -1, self.num_anchors)
-                
                 # Filter by score threshold
                 mask = final_scores > score_threshold
                 
@@ -603,9 +601,9 @@ class YOLOv5Model(nn.Module):
             
             # Combine predictions from all scales
             if all_boxes:
-                boxes_tensor = torch.cat(all_boxes, dim=0)
-                scores_tensor = torch.cat(all_scores, dim=0)
-                labels_tensor = torch.cat(all_labels, dim=0)
+                boxes_tensor = torch.cat(all_boxes, dim=0).to(device)
+                scores_tensor = torch.cat(all_scores, dim=0).to(device)
+                labels_tensor = torch.cat(all_labels, dim=0).to(device)
                 
                 # Apply NMS per class
                 keep_indices = []
@@ -613,15 +611,19 @@ class YOLOv5Model(nn.Module):
                 
                 for label in unique_labels:
                     label_mask = labels_tensor == label
-                    if label_mask.sum() == 0:
+                    num_label_detections = label_mask.sum().item()
+                    if num_label_detections == 0:
                         continue
                     
                     label_boxes = boxes_tensor[label_mask]
                     label_scores = scores_tensor[label_mask]
                     label_indices = torch.where(label_mask)[0]
                     
-                    # Apply NMS
-                    keep = nms(label_boxes, label_scores, nms_threshold)
+                    # Apply NMS (handle edge case of single detection)
+                    if num_label_detections == 1:
+                        keep = torch.tensor([0], device=device, dtype=torch.long)
+                    else:
+                        keep = nms(label_boxes, label_scores, nms_threshold)
                     keep_indices.extend(label_indices[keep].tolist())
                 
                 if keep_indices:

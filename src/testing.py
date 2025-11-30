@@ -36,25 +36,38 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
             images = images.to(device, non_blocking=True)
             
             # Get predictions in inference mode (without targets) - this is the slow part
-            outputs = model(images)
+            try:
+                outputs = model(images)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Error getting predictions for batch {batch_idx}: {e}. Skipping batch.")
+                continue
             
             # Move targets to CPU only after getting predictions (avoid blocking)
             for i in range(len(images)):
                 if isinstance(outputs, list) and len(outputs) > i:
                     pred = outputs[i]
+                    # Validate prediction structure
+                    if not isinstance(pred, dict) or 'boxes' not in pred:
+                        continue
                     # Move predictions to CPU (batch move is faster)
-                    all_predictions.append({
-                        'boxes': pred['boxes'].cpu(),
-                        'scores': pred['scores'].cpu(),
-                        'labels': pred['labels'].cpu()
-                    })
-                    
-                    # Move targets to CPU
-                    all_targets.append({
-                        'boxes': targets[i]['boxes'].cpu(),
-                        'labels': targets[i]['labels'].cpu()
-                    })
-                    sample_count += 1
+                    try:
+                        all_predictions.append({
+                            'boxes': pred['boxes'].cpu() if isinstance(pred['boxes'], torch.Tensor) else torch.tensor(pred['boxes']),
+                            'scores': pred['scores'].cpu() if isinstance(pred['scores'], torch.Tensor) else torch.tensor(pred['scores']),
+                            'labels': pred['labels'].cpu() if isinstance(pred['labels'], torch.Tensor) else torch.tensor(pred['labels'], dtype=torch.long)
+                        })
+                        
+                        # Move targets to CPU
+                        all_targets.append({
+                            'boxes': targets[i]['boxes'].cpu() if isinstance(targets[i]['boxes'], torch.Tensor) else torch.tensor(targets[i]['boxes']),
+                            'labels': targets[i]['labels'].cpu() if isinstance(targets[i]['labels'], torch.Tensor) else torch.tensor(targets[i]['labels'], dtype=torch.long)
+                        })
+                        sample_count += 1
+                    except Exception as e:
+                        import warnings
+                        warnings.warn(f"Error processing prediction for image {i} in batch {batch_idx}: {e}. Skipping.")
+                        continue
     
     if len(all_predictions) == 0:
         return {
