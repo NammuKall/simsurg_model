@@ -223,15 +223,25 @@ class YOLOv5Model(nn.Module):
         # YOLOv5 PANet feature pyramid
         # Top-down path
         p5 = large_features
-        p4 = torch.cat([self.upsample1(p5), medium_features], dim=1)
+        
+        # Upsample p5 to match medium_features spatial dimensions exactly
+        upsampled_p5 = F.interpolate(p5, size=medium_features.shape[2:], mode='nearest', align_corners=None)
+        p4 = torch.cat([upsampled_p5, medium_features], dim=1)
         p4 = self.fusion1(p4)
-        p3 = torch.cat([self.upsample2(p4), small_features], dim=1)
+        
+        # Upsample p4 to match small_features spatial dimensions exactly
+        upsampled_p4 = F.interpolate(p4, size=small_features.shape[2:], mode='nearest', align_corners=None)
+        p3 = torch.cat([upsampled_p4, small_features], dim=1)
         p3 = self.fusion2(p3)
         
         # Bottom-up path (for better feature fusion)
-        # Use original feature maps, not fused ones
-        p4_bottom = torch.cat([medium_features, self.downsample1(p3)], dim=1)
-        p5_bottom = torch.cat([large_features, self.downsample2(p4)], dim=1)
+        # Downsample p3 to match medium_features spatial dimensions exactly
+        downsampled_p3 = F.interpolate(p3, size=medium_features.shape[2:], mode='nearest', align_corners=None)
+        p4_bottom = torch.cat([medium_features, downsampled_p3], dim=1)
+        
+        # Downsample p4 to match large_features spatial dimensions exactly
+        downsampled_p4 = F.interpolate(p4, size=large_features.shape[2:], mode='nearest', align_corners=None)
+        p5_bottom = torch.cat([large_features, downsampled_p4], dim=1)
         
         # Detection at 3 scales
         scale1_out = self.detect_scale1(p5_bottom)  # Large objects
