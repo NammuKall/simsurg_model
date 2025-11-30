@@ -68,6 +68,10 @@ class YOLOv5Model(nn.Module):
         # For simplicity, we'll use a ResNet-based backbone similar to other models
         # but with YOLOv5-style detection heads
         
+        # Number of anchors per scale (YOLOv5 uses 3 anchors per scale)
+        # Set this FIRST before calling _make_yolov5_head which needs it
+        self.num_anchors = 3
+        
         # Backbone (using ResNet50 for compatibility, can be replaced with CSPDarkNet)
         if self.model_size == 'n':
             backbone = models.mobilenet_v3_small(weights='IMAGENET1K_V1' if self.pretrained else None)
@@ -101,9 +105,6 @@ class YOLOv5Model(nn.Module):
         # Feature fusion
         self.fusion1 = nn.Conv2d(backbone_channels[3] + backbone_channels[2], backbone_channels[2], kernel_size=1)
         self.fusion2 = nn.Conv2d(backbone_channels[2] + backbone_channels[1], backbone_channels[1], kernel_size=1)
-        
-        # Number of anchors per scale (YOLOv5 uses 3 anchors per scale)
-        self.num_anchors = 3
         
         # Store pretrained flag
         self.pretrained = self.pretrained if hasattr(self, 'pretrained') else True
