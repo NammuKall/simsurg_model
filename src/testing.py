@@ -33,33 +33,26 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
             if num_samples and sample_count >= num_samples:
                 break
                 
-            images = images.to(device)
+            images = images.to(device, non_blocking=True)
             
-            # Move targets to device for loss computation (but we won't use loss mode)
-            val_targets = []
-            for j in range(len(targets)):
-                val_targets.append({
-                    'boxes': targets[j]['boxes'].to(device),
-                    'labels': targets[j]['labels'].to(device),
-                    'image_id': targets[j]['image_id'].to(device) if 'image_id' in targets[j] else torch.tensor([j], device=device)
-                })
-            
-            # Get predictions in inference mode (without targets)
+            # Get predictions in inference mode (without targets) - this is the slow part
             outputs = model(images)
             
-            # Store predictions and targets
+            # Move targets to CPU only after getting predictions (avoid blocking)
             for i in range(len(images)):
                 if isinstance(outputs, list) and len(outputs) > i:
                     pred = outputs[i]
+                    # Move predictions to CPU (batch move is faster)
                     all_predictions.append({
                         'boxes': pred['boxes'].cpu(),
                         'scores': pred['scores'].cpu(),
                         'labels': pred['labels'].cpu()
                     })
                     
+                    # Move targets to CPU
                     all_targets.append({
-                        'boxes': val_targets[i]['boxes'].cpu(),
-                        'labels': val_targets[i]['labels'].cpu()
+                        'boxes': targets[i]['boxes'].cpu(),
+                        'labels': targets[i]['labels'].cpu()
                     })
                     sample_count += 1
     

@@ -271,15 +271,17 @@ class YOLOv5Model(nn.Module):
             # Store input image size for loss computation and postprocessing
             input_img_size = (x.shape[2], x.shape[3])  # (H, W)
             
-            # Validate input_size parameter if set (warn if mismatch)
+            # Validate input_size parameter if set (warn if significant mismatch)
+            # Note: input_size is a reference size, model can handle different sizes
             if self.input_size > 0:
                 expected_size = self.input_size
                 actual_size = max(input_img_size)
-                if abs(actual_size - expected_size) > 10:  # Allow 10px tolerance
+                # Only warn if difference is significant (>50% different)
+                if abs(actual_size - expected_size) > max(expected_size * 0.5, 100):
                     import warnings
                     warnings.warn(
-                        f"Input size mismatch: model expects ~{expected_size}px, "
-                        f"got {actual_size}px. This may affect performance.",
+                        f"Input size differs significantly: model reference size is {expected_size}px, "
+                        f"got {actual_size}px. Model will adapt, but performance may vary.",
                         UserWarning
                     )
             
@@ -386,23 +388,29 @@ class YOLOv5Model(nn.Module):
                 continue
             
             for box_idx, (box, label) in enumerate(zip(gt_boxes, gt_labels)):
-                # Normalize box coordinates
-                x_center = (box[0] + box[2]) / 2.0 / img_size[1]
-                y_center = (box[1] + box[3]) / 2.0 / img_size[0]
-                w = (box[2] - box[0]) / img_size[1]
-                h = (box[3] - box[1]) / img_size[0]
+                # Normalize box coordinates (ensure they're tensors first)
+                if isinstance(box, torch.Tensor):
+                    x_center = ((box[0] + box[2]) / 2.0 / img_size[1]).item()
+                    y_center = ((box[1] + box[3]) / 2.0 / img_size[0]).item()
+                    w = ((box[2] - box[0]) / img_size[1]).item()
+                    h = ((box[3] - box[1]) / img_size[0]).item()
+                else:
+                    x_center = (box[0] + box[2]) / 2.0 / img_size[1]
+                    y_center = (box[1] + box[3]) / 2.0 / img_size[0]
+                    w = (box[2] - box[0]) / img_size[1]
+                    h = (box[3] - box[1]) / img_size[0]
                 
-                # Clamp normalized coordinates
+                # Clamp normalized coordinates (now Python floats)
                 x_center = max(0.0, min(1.0, x_center))
                 y_center = max(0.0, min(1.0, y_center))
                 w = max(0.001, min(1.0, w))
                 h = max(0.001, min(1.0, h))
                 
-                # Convert to tensors for vectorized operations
-                x_center_t = torch.tensor(x_center, device=device)
-                y_center_t = torch.tensor(y_center, device=device)
-                w_t = torch.tensor(w, device=device)
-                h_t = torch.tensor(h, device=device)
+                # Convert to tensors for vectorized operations (from Python floats, no warning)
+                x_center_t = torch.tensor(x_center, device=device, dtype=torch.float32)
+                y_center_t = torch.tensor(y_center, device=device, dtype=torch.float32)
+                w_t = torch.tensor(w, device=device, dtype=torch.float32)
+                h_t = torch.tensor(h, device=device, dtype=torch.float32)
                 
                 # Find best scale and anchor for this object
                 # Assign to scale based on object size (larger objects to larger scales)
@@ -497,7 +505,7 @@ class YOLOv5Model(nn.Module):
     
     def postprocess_predictions(self, predictions, img_size, score_threshold=0.25, nms_threshold=0.45):
         """
-        Convert raw YOLOv5 predictions to final detections with NMS
+        Convert raw YOLOv5 predictions to final detections with NMS (vectorized for performance)
         
         Args:
             predictions: List of 3 prediction tensors (one per scale)
@@ -510,106 +518,125 @@ class YOLOv5Model(nn.Module):
         """
         # Validate batch sizes match across scales
         batch_size = predictions[0].shape[0]
+        device = predictions[0].device
         for pred in predictions[1:]:
             if pred.shape[0] != batch_size:
                 raise ValueError(f"Batch size mismatch: scale 0 has {batch_size}, but other scale has {pred.shape[0]}")
         
         results = []
+        img_h, img_w = img_size[0], img_size[1]
         
-        # Process all scales and combine predictions
-        all_boxes = []
-        all_scores = []
-        all_labels = []
-        
-        for scale_idx, pred in enumerate(predictions):
-            B, _, H, W = pred.shape
-            
-            # Reshape
-            pred = pred.view(B, self.num_anchors, 5 + self.num_classes, H, W)
-            pred = pred.permute(0, 3, 4, 1, 2).contiguous()
-            
-            for i in range(batch_size):
-                if i >= len(all_boxes):
-                    all_boxes.append([])
-                    all_scores.append([])
-                    all_labels.append([])
-                
-                # Process each grid cell
-                for grid_y in range(H):
-                    for grid_x in range(W):
-                        for anchor_idx in range(self.num_anchors):
-                            anchor_pred = pred[i, grid_y, grid_x, anchor_idx, :]
-                            
-                            # Extract components
-                            x_center = torch.sigmoid(anchor_pred[0]).item()
-                            y_center = torch.sigmoid(anchor_pred[1]).item()
-                            # Apply exp() and clamp to prevent numerical instability
-                            w = torch.clamp(torch.exp(anchor_pred[2]), max=4.0).item()
-                            h = torch.clamp(torch.exp(anchor_pred[3]), max=4.0).item()
-                            conf = torch.sigmoid(anchor_pred[4]).item()
-                            
-                            # Get class predictions
-                            class_logits = anchor_pred[5:]
-                            class_probs = F.softmax(class_logits, dim=0)
-                            class_score, class_idx = class_probs.max(0)
-                            
-                            # Final score = confidence * class_probability
-                            final_score = conf * class_score.item()
-                            
-                            if final_score > score_threshold:
-                                # Convert to absolute coordinates
-                                # Clamp coordinates to ensure valid boxes
-                                x_min = max(0, (x_center - w / 2) * img_size[1])
-                                y_min = max(0, (y_center - h / 2) * img_size[0])
-                                x_max = min(img_size[1], (x_center + w / 2) * img_size[1])
-                                y_max = min(img_size[0], (y_center + h / 2) * img_size[0])
-                                
-                                # Ensure valid box (x_min < x_max, y_min < y_max) and positive dimensions
-                                if x_max > x_min and y_max > y_min and w > 0 and h > 0:
-                                    all_boxes[i].append([x_min, y_min, x_max, y_max])
-                                    all_scores[i].append(final_score)
-                                    all_labels[i].append(int(class_idx.item()) + 1)  # Convert to 1-indexed
-        
-        # Apply NMS per image
-        device = predictions[0].device
+        # Process each image in batch
         for i in range(batch_size):
-            if len(all_boxes[i]) == 0:
-                results.append({
-                    'boxes': torch.zeros((0, 4), device=device),
-                    'scores': torch.zeros(0, device=device),
-                    'labels': torch.zeros(0, dtype=torch.long, device=device)
-                })
-                continue
+            all_boxes = []
+            all_scores = []
+            all_labels = []
             
-            # Convert to tensors
-            boxes_tensor = torch.tensor(all_boxes[i], device=device)
-            scores_tensor = torch.tensor(all_scores[i], device=device)
-            labels_tensor = torch.tensor(all_labels[i], device=device, dtype=torch.long)
-            
-            # Apply NMS per class
-            keep_indices = []
-            unique_labels = torch.unique(labels_tensor)
-            
-            for label in unique_labels:
-                label_mask = labels_tensor == label
-                if label_mask.sum() == 0:
-                    continue
+            # Process all scales for this image
+            for scale_idx, pred in enumerate(predictions):
+                B, _, H, W = pred.shape
                 
-                label_boxes = boxes_tensor[label_mask]
-                label_scores = scores_tensor[label_mask]
-                label_indices = torch.where(label_mask)[0]
+                # Reshape: [B, anchors, 5+classes, H, W] -> [B, H, W, anchors, 5+classes]
+                pred_reshaped = pred.view(B, self.num_anchors, 5 + self.num_classes, H, W)
+                pred_reshaped = pred_reshaped.permute(0, 3, 4, 1, 2).contiguous()
                 
-                # Apply NMS
-                keep = nms(label_boxes, label_scores, nms_threshold)
-                keep_indices.extend(label_indices[keep].tolist())
+                # Extract predictions for this image: [H, W, anchors, 5+classes]
+                img_pred = pred_reshaped[i]  # [H, W, anchors, 5+classes]
+                
+                # Vectorized extraction of all components
+                # Shape: [H, W, anchors]
+                x_center = torch.sigmoid(img_pred[..., 0])
+                y_center = torch.sigmoid(img_pred[..., 1])
+                w = torch.clamp(torch.exp(img_pred[..., 2]), max=4.0)
+                h = torch.clamp(torch.exp(img_pred[..., 3]), max=4.0)
+                conf = torch.sigmoid(img_pred[..., 4])
+                
+                # Class predictions: [H, W, anchors, num_classes]
+                class_logits = img_pred[..., 5:]
+                class_probs = F.softmax(class_logits, dim=-1)
+                class_scores, class_indices = class_probs.max(dim=-1)  # [H, W, anchors]
+                
+                # Final scores: [H, W, anchors]
+                final_scores = conf * class_scores
+                
+                # Create grid coordinates
+                grid_y, grid_x = torch.meshgrid(
+                    torch.arange(H, device=device, dtype=torch.float32),
+                    torch.arange(W, device=device, dtype=torch.float32),
+                    indexing='ij'
+                )
+                
+                # Expand for anchors: [H, W, anchors]
+                grid_x = grid_x.unsqueeze(-1).expand(-1, -1, self.num_anchors)
+                grid_y = grid_y.unsqueeze(-1).expand(-1, -1, self.num_anchors)
+                
+                # Filter by score threshold
+                mask = final_scores > score_threshold
+                
+                if mask.any():
+                    # Get indices where mask is True
+                    indices = torch.nonzero(mask, as_tuple=False)  # [N, 3] (y, x, anchor)
+                    
+                    # Extract values at masked positions
+                    x_centers = x_center[mask]
+                    y_centers = y_center[mask]
+                    ws = w[mask]
+                    hs = h[mask]
+                    scores = final_scores[mask]
+                    labels = class_indices[mask] + 1  # Convert to 1-indexed
+                    
+                    # Convert to absolute coordinates (vectorized)
+                    x_min = torch.clamp((x_centers - ws / 2) * img_w, min=0, max=img_w)
+                    y_min = torch.clamp((y_centers - hs / 2) * img_h, min=0, max=img_h)
+                    x_max = torch.clamp((x_centers + ws / 2) * img_w, min=0, max=img_w)
+                    y_max = torch.clamp((y_centers + hs / 2) * img_h, min=0, max=img_h)
+                    
+                    # Filter valid boxes (x_max > x_min, y_max > y_min)
+                    valid_mask = (x_max > x_min) & (y_max > y_min) & (ws > 0) & (hs > 0)
+                    
+                    if valid_mask.any():
+                        boxes = torch.stack([x_min[valid_mask], y_min[valid_mask], 
+                                           x_max[valid_mask], y_max[valid_mask]], dim=1)
+                        all_boxes.append(boxes)
+                        all_scores.append(scores[valid_mask])
+                        all_labels.append(labels[valid_mask])
             
-            if keep_indices:
-                keep_indices = torch.tensor(keep_indices, device=device)
-                results.append({
-                    'boxes': boxes_tensor[keep_indices],
-                    'scores': scores_tensor[keep_indices],
-                    'labels': labels_tensor[keep_indices]
-                })
+            # Combine predictions from all scales
+            if all_boxes:
+                boxes_tensor = torch.cat(all_boxes, dim=0)
+                scores_tensor = torch.cat(all_scores, dim=0)
+                labels_tensor = torch.cat(all_labels, dim=0)
+                
+                # Apply NMS per class
+                keep_indices = []
+                unique_labels = torch.unique(labels_tensor)
+                
+                for label in unique_labels:
+                    label_mask = labels_tensor == label
+                    if label_mask.sum() == 0:
+                        continue
+                    
+                    label_boxes = boxes_tensor[label_mask]
+                    label_scores = scores_tensor[label_mask]
+                    label_indices = torch.where(label_mask)[0]
+                    
+                    # Apply NMS
+                    keep = nms(label_boxes, label_scores, nms_threshold)
+                    keep_indices.extend(label_indices[keep].tolist())
+                
+                if keep_indices:
+                    keep_indices = torch.tensor(keep_indices, device=device)
+                    results.append({
+                        'boxes': boxes_tensor[keep_indices],
+                        'scores': scores_tensor[keep_indices],
+                        'labels': labels_tensor[keep_indices]
+                    })
+                else:
+                    results.append({
+                        'boxes': torch.zeros((0, 4), device=device),
+                        'scores': torch.zeros(0, device=device),
+                        'labels': torch.zeros(0, dtype=torch.long, device=device)
+                    })
             else:
                 results.append({
                     'boxes': torch.zeros((0, 4), device=device),
