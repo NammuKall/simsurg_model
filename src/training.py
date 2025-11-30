@@ -18,7 +18,7 @@ logger = logging.getLogger()
 console = Console()
 
 
-def train_epoch(model, train_loader, optimizer, device, epoch, num_epochs, wandb_api_key, batch_size, val_loader):
+def train_epoch(model, train_loader, optimizer, device, epoch, num_epochs, wandb_api_key, batch_size, val_loader, scheduler=None):
     """Train for one epoch"""
     model.train()
     train_loss = 0.0
@@ -61,14 +61,13 @@ def train_epoch(model, train_loader, optimizer, device, epoch, num_epochs, wandb
                     optimizer.zero_grad()
                     loss.backward()
                     
-                    grad_norm = 0.0
-                    for param in model.parameters():
-                        if param.grad is not None:
-                            grad_norm += param.grad.data.norm(2).item() ** 2
-                    grad_norm = grad_norm ** 0.5
+                    # Gradient clipping to prevent exploding gradients (important for YOLOv5)
+                    max_grad_norm = 10.0
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    grad_norm_value = grad_norm.item()
                     
-                    if torch.isnan(torch.tensor(grad_norm)) or torch.isinf(torch.tensor(grad_norm)):
-                        logger.warning(f"Invalid gradient norm at batch {i}: {grad_norm}")
+                    if torch.isnan(torch.tensor(grad_norm_value)) or torch.isinf(torch.tensor(grad_norm_value)):
+                        logger.warning(f"Invalid gradient norm at batch {i}: {grad_norm_value}")
                         failed_batches += 1
                         continue
                     
@@ -88,7 +87,7 @@ def train_epoch(model, train_loader, optimizer, device, epoch, num_epochs, wandb
                         log_dict = {
                             "batch_train_loss": loss.item(),
                             "batch": i + epoch * len(train_loader),
-                            "grad_norm": grad_norm,
+                            "grad_norm": grad_norm_value,
                             "learning_rate": optimizer.param_groups[0]['lr'],
                             "batch_time": batch_time,
                             "samples_per_sec": samples_per_sec
@@ -102,7 +101,7 @@ def train_epoch(model, train_loader, optimizer, device, epoch, num_epochs, wandb
                     
                     if (i + 1) % 10 == 0:
                         logger.info(f'Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}, '
-                                   f'Grad Norm: {grad_norm:.4f}, Batch Time: {batch_time:.3f}s, '
+                                   f'Grad Norm: {grad_norm_value:.4f}, Batch Time: {batch_time:.3f}s, '
                                    f'Speed: {samples_per_sec:.1f} samples/sec')
                     
                     if (i + 1) % 100 == 0 and wandb_api_key:

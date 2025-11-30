@@ -81,6 +81,10 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
     false_negatives = 0
     iou_scores = []
     
+    # Track total predictions and ground truths for debugging
+    total_pred_boxes = 0
+    total_gt_boxes = 0
+    
     for pred, target in zip(all_predictions, all_targets):
         pred_boxes = pred['boxes']
         pred_scores = pred['scores']
@@ -110,6 +114,10 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
         if num_gt_boxes == 0:
             false_positives += num_pred_boxes
             continue
+        
+        # Track totals for debugging
+        total_pred_boxes += num_pred_boxes
+        total_gt_boxes += num_gt_boxes
         
         # Handle empty predictions - all ground truths become false negatives
         if num_pred_boxes == 0:
@@ -178,8 +186,19 @@ def compute_detection_metrics(model, data_loader, device, num_samples=None):
     # Calculate metrics
     mean_iou = np.mean(iou_scores) if len(iou_scores) > 0 else 0.0
     
+    # Calculate precision: TP / (TP + FP)
+    # When TP=0 and FP=0, precision is undefined (0/0), return 0.0
+    # When TP=0 and FP>0, precision is 0.0 (no correct predictions)
+    # When TP>0, precision is TP/(TP+FP)
     precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0.0
+    
+    # Calculate recall: TP / (TP + FN)
+    # When TP=0 and FN>0, recall is 0.0 (no correct predictions)
+    # When TP=0 and FN=0, recall is undefined (0/0), return 0.0
+    # When TP>0, recall is TP/(TP+FN)
     recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0.0
+    
+    # Calculate F1 score: 2 * (precision * recall) / (precision + recall)
     f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
     
     return {

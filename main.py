@@ -269,7 +269,44 @@ def setup_device_and_model(wandb_api_key):
     )
     
     learning_rate = float(os.getenv("LEARNING_RATE", "0.001"))
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    
+    # For YOLOv5, use differential learning rates: lower for backbone, higher for detection heads
+    if model_name == "YOLOv5":
+        # Separate parameters into backbone and detection heads
+        backbone_params = []
+        head_params = []
+        for name, param in model.named_parameters():
+            if 'backbone' in name or 'layer' in name or 'conv1' in name or 'bn1' in name:
+                backbone_params.append(param)
+            else:
+                head_params.append(param)
+        
+        # Use lower LR for pretrained backbone, higher for detection heads
+        optimizer = optim.Adam([
+            {'params': backbone_params, 'lr': learning_rate * 0.1},  # 10x lower for backbone
+            {'params': head_params, 'lr': learning_rate}  # Full LR for heads
+        ], lr=learning_rate, weight_decay=0.0005)  # Add weight decay for regularization
+        
+        # Create learning rate scheduler with cosine annealing and warmup
+        from torch.optim.lr_scheduler import LambdaLR
+        num_epochs = int(os.getenv("NUM_EPOCHS", "10"))
+        warmup_epochs = max(1, num_epochs // 10)  # 10% warmup
+        
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                # Linear warmup
+                return (epoch + 1) / warmup_epochs
+            else:
+                # Cosine annealing
+                progress = (epoch - warmup_epochs) / (num_epochs - warmup_epochs)
+                return 0.5 * (1 + np.cos(np.pi * progress))
+        
+        scheduler = LambdaLR(optimizer, lr_lambda)
+        logger.info(f"Using differential LR: backbone={learning_rate * 0.1}, heads={learning_rate}")
+        logger.info(f"LR scheduler: warmup={warmup_epochs} epochs, then cosine annealing")
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        scheduler = None
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -285,7 +322,7 @@ def setup_device_and_model(wandb_api_key):
             "model_class": model_info.get('class', 'N/A')
         })
     
-    return device, model, optimizer, learning_rate, total_params
+    return device, model, optimizer, learning_rate, total_params, scheduler
 
 
 def save_model(model, best_model_state, optimizer, train_losses, val_losses, best_val_iou, 
@@ -516,7 +553,7 @@ def main():
     batch_size = int(os.getenv("BATCH_SIZE", "4"))
     train_loader, val_loader, test_loader = setup_data_loaders(paths['coco_paths'], batch_size)
     
-    device, model, optimizer, learning_rate, total_params = setup_device_and_model(wandb_api_key)
+    device, model, optimizer, learning_rate, total_params, scheduler = setup_device_and_model(wandb_api_key)
     
     # Get model name and variant for saving
     model_name = os.getenv("MODEL_NAME", "EfficientDet")
@@ -547,7 +584,16 @@ def main():
         
         # Train epoch
         train_stats = train_epoch(model, train_loader, optimizer, device, epoch, num_epochs, 
-                                 wandb_api_key, batch_size, val_loader)
+                                 wandb_api_key, batch_size, val_loader, scheduler=scheduler)
+        
+        # Update learning rate scheduler after each epoch
+        if scheduler is not None:
+            scheduler.step()
+            # Get current learning rate from optimizer (works for all scheduler types)
+            current_lr = optimizer.param_groups[0]['lr']
+            logger.info(f"Learning rate after epoch {epoch+1}: {current_lr:.6f}")
+            if wandb_api_key:
+                wandb.log({"learning_rate": current_lr, "epoch": epoch})
         train_losses.append(train_stats['avg_loss'])
         
         # Log training results
@@ -574,8 +620,11 @@ def main():
                    f"Successful: {val_stats['successful_batches']}, Failed: {val_stats['failed_batches']}")
         
         # Compute metrics and update best model
-        # Compute training metrics every 2 epochs to reduce overhead
-        compute_train_metrics = (epoch % 2 == 0)
+        # Compute training metrics every epoch for EfficientDet, every 2 epochs for other models to reduce overhead
+        if model_name == "EfficientDet":
+            compute_train_metrics = True
+        else:
+            compute_train_metrics = (epoch % 2 == 0)
         best_val_iou, best_epoch, best_model_state = compute_and_log_metrics(
             model, train_loader, val_loader, device, epoch, train_stats, val_stats,
             best_val_iou, best_epoch, best_model_state, wandb_api_key, epoch_start_time,
