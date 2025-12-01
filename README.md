@@ -7,6 +7,7 @@ This project provides a comprehensive object detection model training pipeline f
 - **Multiple Model Architectures**: Support for EfficientDet, FasterRCNN, YOLOv5, and ResNet models
 - **Model Factory Pattern**: Easy switching between models via configuration
 - **Model Variants**: Pre-configured variants for each model (e.g., YOLOv5-Small, FasterRCNN-Frozen)
+- **Complete Data Pipeline**: End-to-end data processing from video extraction to COCO format conversion
 - **Enhanced Logging**: Beautiful console output with Rich library and comprehensive file logging
 - **Weights & Biases Integration**: Real-time experiment tracking and visualization
 - **Robust Error Handling**: Detailed error tracking and recovery mechanisms
@@ -117,10 +118,17 @@ MODEL_SAVE_DIR=models
 simsurg_model/
 ├── main.py                 # Main training script
 ├── inference.py            # Inference script for model evaluation
-├── data.py                 # Data processing pipeline
+├── data.py                 # Data processing pipeline orchestrator
 ├── requirements.txt        # Dependencies
 ├── env.example            # Environment variables template
 ├── README.md              # This file
+├── ref/                   # Reference documentation
+│   ├── MODEL_OPTIMIZATION_PLAN.md
+│   ├── MODEL_REFACTORING_PLAN.md
+│   ├── QUICK_START_OPTIMIZATIONS.md
+│   ├── REFACTORING_SUMMARY.md
+│   ├── YOLOV5_ISSUES.md
+│   └── YOLOV5_OPTIMIZATION_SUMMARY.md
 ├── src/
 │   ├── models/
 │   │   ├── __init__.py
@@ -131,17 +139,41 @@ simsurg_model/
 │   │   ├── yolov5.py           # YOLOv5 model
 │   │   ├── resnet.py           # ResNet model
 │   │   └── README.md           # Model documentation
-│   ├── coco_data_loader.py     # COCO format data loading
-│   ├── coco_converter.py        # COCO format conversion utilities
+│   ├── data/                    # Data processing module
+│   │   ├── __init__.py
+│   │   ├── coco_data_loader.py  # COCO format data loading
+│   │   ├── coco_converter.py    # COCO format conversion utilities
+│   │   ├── coco_json.py         # COCO JSON generation
+│   │   ├── data_extractor.py    # Video frame extraction
+│   │   ├── data_loader.py       # General data loading utilities
+│   │   ├── data_wrangler.py     # Data wrangling and validation
+│   │   └── plots.py             # Data visualization plots
 │   ├── training.py              # Training functions
 │   ├── testing.py               # Testing and evaluation functions
 │   ├── evaluation_metrics.py   # Evaluation metrics computation
 │   ├── visualization.py        # Visualization utilities
-│   └── utils.py                 # Utility functions
+│   ├── utils.py                 # Utility functions
+│   └── models.py                # Backward compatibility wrapper
 ├── logs/                  # Training logs (auto-created)
 ├── models/                # Saved models (auto-created)
 └── results/               # Training plots and results (auto-created)
 ```
+
+## 📊 Data Processing
+
+Before training, you may need to process your raw data into COCO format:
+
+```bash
+python data.py
+```
+
+This will:
+1. Extract frames from videos (parallel processing)
+2. Wrangle and validate data
+3. Create COCO format JSON files
+4. Generate data visualization plots
+
+The script supports various options - see `data.py --help` for details.
 
 ## 🏃‍♂️ Running Training
 
@@ -274,6 +306,7 @@ Detailed logs are saved to `logs/training_YYYYMMDD_HHMMSS.log` with:
    - Check file paths in `.env`
    - Ensure proper permissions
    - Run `python data.py` to generate COCO format if needed
+   - Ensure data directory structure matches expected format
 
 4. **Model Loading Errors**:
    - Ensure `MODEL_NAME` matches the checkpoint's model architecture
@@ -337,9 +370,10 @@ logger, log_file = setup_logging(log_level=logging.WARNING)
 ## 📚 Additional Documentation
 
 - **Model Documentation**: See `src/models/README.md` for detailed model information
-- **Refactoring Summary**: See `REFACTORING_SUMMARY.md` for architecture details
-- **YOLOv5 Issues**: See `YOLOV5_ISSUES.md` for YOLOv5-specific notes
-- **Optimization Plans**: See `MODEL_OPTIMIZATION_PLAN.md` and `QUICK_START_OPTIMIZATIONS.md`
+- **Refactoring Summary**: See `ref/REFACTORING_SUMMARY.md` for architecture details
+- **YOLOv5 Issues**: See `ref/YOLOV5_ISSUES.md` for YOLOv5-specific notes
+- **Optimization Plans**: See `ref/MODEL_OPTIMIZATION_PLAN.md` and `ref/QUICK_START_OPTIMIZATIONS.md`
+- **YOLOv5 Optimization**: See `ref/YOLOV5_OPTIMIZATION_SUMMARY.md` for YOLOv5 optimization details
 
 ## 🤝 Contributing
 
