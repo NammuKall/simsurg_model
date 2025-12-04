@@ -14,6 +14,7 @@ import logging
 import numpy as np
 import torch
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
@@ -141,14 +142,18 @@ def initialize_wandb():
             config={
                 "learning_rate": float(os.getenv("LEARNING_RATE", "0.001")),
                 "batch_size": int(os.getenv("BATCH_SIZE", "4")),
-                "num_epochs": int(os.getenv("NUM_EPOCHS", "10")),
+                "num_epochs": int(os.getenv("NUM_EPOCHS", "50")),
                 "model": model_name,
                 "model_variant": model_variant if model_variant else "default",
                 "dataset": "SimSurgSkill",
                 "num_classes": 2,
-                "optimizer": "Adam",
+                "optimizer": "AdamW" if model_name == "YOLOv5" else "Adam",
                 "loss_function": "CrossEntropy + SmoothL1Loss",
-                "evaluation_frequency": "Every 100 batches + end of epoch"
+                "evaluation_frequency": "Every 100 batches + end of epoch",
+                "weight_decay": float(os.getenv("WEIGHT_DECAY", "0.0005")),
+                "early_stopping_patience": int(os.getenv("EARLY_STOPPING_PATIENCE", "10")),
+                "early_stopping_min_delta": float(os.getenv("EARLY_STOPPING_MIN_DELTA", "0.001")),
+                "lr_scheduler": "CosineAnnealingWithWarmup" if model_name == "YOLOv5" else "None"
             }
         )
         logger.info("W&B run initialized")
@@ -269,7 +274,43 @@ def setup_device_and_model(wandb_api_key):
     )
     
     learning_rate = float(os.getenv("LEARNING_RATE", "0.001"))
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    weight_decay = float(os.getenv("WEIGHT_DECAY", "0.0005"))
+    
+    # Separate parameters for differential learning rates (YOLOv5 only)
+    if model_name == "YOLOv5":
+        # Identify parameter groups
+        backbone_params = []
+        panet_params = []
+        head_params = []
+        
+        for name, param in model.named_parameters():
+            if 'backbone' in name:
+                backbone_params.append(param)
+            elif 'fusion' in name or 'upsample' in name or 'downsample' in name:
+                panet_params.append(param)
+            elif 'detect_scale' in name:
+                head_params.append(param)
+            else:
+                # Default: assign to head params (includes any other layers)
+                head_params.append(param)
+        
+        # Create optimizer with differential learning rates
+        optimizer = optim.AdamW([
+            {'params': backbone_params, 'lr': learning_rate * 0.1},  # 10x lower for pretrained backbone
+            {'params': panet_params, 'lr': learning_rate * 0.5},   # 5x lower for PANet
+            {'params': head_params, 'lr': learning_rate}            # Full LR for detection heads
+        ], lr=learning_rate, weight_decay=weight_decay)
+        
+        logger.info(f"YOLOv5 differential LR: backbone={learning_rate*0.1:.6f}, "
+                    f"PANet={learning_rate*0.5:.6f}, heads={learning_rate:.6f}")
+        console.print(f"[cyan]🎯 Differential Learning Rates:[/cyan] "
+                      f"Backbone={learning_rate*0.1:.6f}, PANet={learning_rate*0.5:.6f}, Heads={learning_rate:.6f}")
+    else:
+        # For other models, use single learning rate
+        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    
+    # Scheduler will be configured in main() for YOLOv5
+    scheduler = None
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -282,13 +323,15 @@ def setup_device_and_model(wandb_api_key):
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
             "model_architecture": model_name,
-            "model_class": model_info.get('class', 'N/A')
+            "model_class": model_info.get('class', 'N/A'),
+            "weight_decay": weight_decay,
+            "optimizer": "AdamW"
         })
     
-    return device, model, optimizer, learning_rate, total_params
+    return device, model, optimizer, scheduler, learning_rate, total_params
 
 
-def save_model(model, best_model_state, optimizer, train_losses, val_losses, best_val_iou, 
+def save_model(model, best_model_state, optimizer, scheduler, train_losses, val_losses, best_val_iou, 
               best_epoch, num_epochs, learning_rate, batch_size, base_dir, wandb_api_key,
               model_name=None, model_variant=None):
     """Save model and upload to W&B if enabled"""
@@ -314,6 +357,7 @@ def save_model(model, best_model_state, optimizer, train_losses, val_losses, bes
         'model_state_dict': model.state_dict(),
         'best_model_state': best_model_state if best_model_state else model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
         'train_losses': train_losses,
         'val_losses': val_losses,
         'best_val_iou': best_val_iou,
@@ -516,19 +560,54 @@ def main():
     batch_size = int(os.getenv("BATCH_SIZE", "4"))
     train_loader, val_loader, test_loader = setup_data_loaders(paths['coco_paths'], batch_size)
     
-    device, model, optimizer, learning_rate, total_params = setup_device_and_model(wandb_api_key)
+    device, model, optimizer, scheduler, learning_rate, total_params = setup_device_and_model(wandb_api_key)
     
     # Get model name and variant for saving
     model_name = os.getenv("MODEL_NAME", "EfficientDet")
     model_variant = os.getenv("MODEL_VARIANT", None)
     
     # Training loop
-    num_epochs = int(os.getenv("NUM_EPOCHS", "10"))
+    num_epochs = int(os.getenv("NUM_EPOCHS", "50"))
     train_losses = []
     val_losses = []
     best_val_iou = 0.0
     best_epoch = 0
     best_model_state = None
+    
+    # Configure learning rate scheduler for YOLOv5
+    if model_name == "YOLOv5":
+        warmup_epochs = max(1, int(num_epochs * 0.1))  # 10% of epochs, minimum 1
+        cosine_epochs = num_epochs - warmup_epochs
+        
+        # Warmup scheduler: linear increase from 0.1x to 1.0x LR
+        warmup_scheduler = LinearLR(
+            optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=warmup_epochs
+        )
+        
+        # Cosine annealing scheduler: smooth decay after warmup
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=cosine_epochs,
+            eta_min=1e-5  # Minimum learning rate
+        )
+        
+        # Sequential scheduler: warmup then cosine
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_epochs]
+        )
+        
+        logger.info(f"YOLOv5 LR scheduler: {warmup_epochs} epochs warmup, {cosine_epochs} epochs cosine annealing")
+        console.print(f"[cyan]📈 Learning Rate Schedule:[/cyan] {warmup_epochs} warmup → {cosine_epochs} cosine (min LR: 1e-5)")
+    
+    # Early stopping configuration
+    early_stopping_patience = int(os.getenv("EARLY_STOPPING_PATIENCE", "10"))
+    early_stopping_min_delta = float(os.getenv("EARLY_STOPPING_MIN_DELTA", "0.001"))
+    early_stopping_counter = 0
     
     console.print(Panel.fit(
         f"[bold green]STARTING TRAINING[/bold green]\n"
@@ -579,22 +658,39 @@ def main():
             compute_train_metrics = True
         else:
             compute_train_metrics = (epoch % 2 == 0)
+        # Store previous best IoU for early stopping check
+        previous_best_iou = best_val_iou
+        
         best_val_iou, best_epoch, best_model_state = compute_and_log_metrics(
             model, train_loader, val_loader, device, epoch, train_stats, val_stats,
             best_val_iou, best_epoch, best_model_state, wandb_api_key, epoch_start_time,
             compute_train_metrics=compute_train_metrics
         )
         
-        # Early stopping check (optional)
-        if len(val_losses) > 3:
-            recent_val_losses = val_losses[-3:]
-            if all(recent_val_losses[i] >= recent_val_losses[i+1] for i in range(len(recent_val_losses)-1)):
-                logger.info("Validation loss is increasing - consider early stopping")
+        # Step learning rate scheduler (for YOLOv5)
+        if scheduler is not None:
+            scheduler.step()
+            current_lr = optimizer.param_groups[0]['lr']
+            logger.info(f"Learning rate after epoch {epoch+1}: {current_lr:.6f}")
+            
+            if wandb_api_key:
+                wandb.log({"learning_rate": current_lr, "epoch": epoch})
+        
+        # Early stopping based on validation IoU improvement
+        if best_val_iou > previous_best_iou + early_stopping_min_delta:
+            # Improvement detected
+            early_stopping_counter = 0
+        else:
+            early_stopping_counter += 1
+            if early_stopping_counter >= early_stopping_patience:
+                logger.info(f"Early stopping triggered: No IoU improvement for {early_stopping_patience} epochs")
+                console.print(f"[yellow]⏹️  Early stopping:[/yellow] No improvement for {early_stopping_patience} epochs")
+                break
     
     # Post-training phase
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_save_path, best_model_path = save_model(
-        model, best_model_state, optimizer, train_losses, val_losses, best_val_iou,
+        model, best_model_state, optimizer, scheduler, train_losses, val_losses, best_val_iou,
         best_epoch, num_epochs, learning_rate, batch_size, paths['base_dir'], wandb_api_key,
         model_name=model_name, model_variant=model_variant
     )

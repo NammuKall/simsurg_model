@@ -75,9 +75,9 @@ class YOLOv5Model(nn.Module):
             raise ValueError(f"input_size must be int or (height, width) tuple, got {input_size}")
         self.model_size = model_size
         
-        # Set loss weights (YOLOv5 standard defaults)
+        # Set loss weights (optimized defaults for small object detection)
         if loss_weights is None:
-            self.loss_weights = {'coord': 0.05, 'conf': 1.0, 'class': 0.5}
+            self.loss_weights = {'coord': 0.1, 'conf': 1.5, 'class': 0.8}
         else:
             self.loss_weights = loss_weights
         
@@ -160,10 +160,10 @@ class YOLOv5Model(nn.Module):
         """Create YOLOv5 detection head"""
         return nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(in_channels),
+            nn.BatchNorm2d(in_channels, momentum=0.03, eps=1e-4),
             nn.SiLU(inplace=True),  # YOLOv5 uses SiLU activation
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(in_channels),
+            nn.BatchNorm2d(in_channels, momentum=0.03, eps=1e-4),
             nn.SiLU(inplace=True),
             nn.Conv2d(in_channels, self.num_anchors * (5 + num_classes), kernel_size=1)
             # 5 = 4 bbox coords + 1 objectness, num_classes = class predictions
