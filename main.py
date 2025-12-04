@@ -147,13 +147,13 @@ def initialize_wandb():
                 "model_variant": model_variant if model_variant else "default",
                 "dataset": "SimSurgSkill",
                 "num_classes": 2,
-                "optimizer": "AdamW" if model_name == "YOLOv5" else "Adam",
+                "optimizer": "AdamW" if model_name.lower() == "yolov5" else "Adam",
                 "loss_function": "CrossEntropy + SmoothL1Loss",
                 "evaluation_frequency": "Every 100 batches + end of epoch",
                 "weight_decay": float(os.getenv("WEIGHT_DECAY", "0.0005")),
                 "early_stopping_patience": int(os.getenv("EARLY_STOPPING_PATIENCE", "10")),
                 "early_stopping_min_delta": float(os.getenv("EARLY_STOPPING_MIN_DELTA", "0.001")),
-                "lr_scheduler": "CosineAnnealingWithWarmup" if model_name == "YOLOv5" else "None"
+                "lr_scheduler": "CosineAnnealingWithWarmup" if model_name.lower() == "yolov5" else "None"
             }
         )
         logger.info("W&B run initialized")
@@ -199,6 +199,12 @@ def setup_data_loaders(coco_paths, batch_size):
     logger.info("Creating data loaders")
     
     train_loader, val_loader, test_loader = get_coco_data_loaders(coco_paths, batch_size=batch_size)
+    
+    # Validate data loaders are not empty
+    if len(train_loader) == 0:
+        raise ValueError("Training data loader is empty! Check your data paths and COCO annotations.")
+    if len(val_loader) == 0:
+        raise ValueError("Validation data loader is empty! Check your data paths and COCO annotations.")
     
     data_info_table = Table(title="Data Loader Information")
     data_info_table.add_column("Split", style="cyan")
@@ -253,8 +259,8 @@ def setup_device_and_model(wandb_api_key):
                 "training_mode": "cpu"
             })
     
-    # Get model name from environment or use default
-    model_name = os.getenv("MODEL_NAME", "EfficientDet")
+    # Get model name from environment or use default (normalize case)
+    model_name = os.getenv("MODEL_NAME", "EfficientDet").strip()
     model_variant = os.getenv("MODEL_VARIANT", None)
     
     # Display model selection info
@@ -273,11 +279,26 @@ def setup_device_and_model(wandb_api_key):
         variant=model_variant
     )
     
-    learning_rate = float(os.getenv("LEARNING_RATE", "0.001"))
-    weight_decay = float(os.getenv("WEIGHT_DECAY", "0.0005"))
+    # Parse hyperparameters with error handling
+    try:
+        learning_rate = float(os.getenv("LEARNING_RATE", "0.001"))
+        if learning_rate <= 0:
+            raise ValueError("Learning rate must be positive")
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Invalid LEARNING_RATE, using default 0.001: {e}")
+        learning_rate = 0.001
+    
+    try:
+        weight_decay = float(os.getenv("WEIGHT_DECAY", "0.0005"))
+        if weight_decay < 0:
+            raise ValueError("Weight decay must be non-negative")
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Invalid WEIGHT_DECAY, using default 0.0005: {e}")
+        weight_decay = 0.0005
     
     # Separate parameters for differential learning rates (YOLOv5 only)
-    if model_name == "YOLOv5":
+    # Normalize model name for case-insensitive comparison
+    if model_name.lower() == "yolov5":
         # Identify parameter groups
         backbone_params = []
         panet_params = []
@@ -294,17 +315,28 @@ def setup_device_and_model(wandb_api_key):
                 # Default: assign to head params (includes any other layers)
                 head_params.append(param)
         
-        # Create optimizer with differential learning rates
-        optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': learning_rate * 0.1},  # 10x lower for pretrained backbone
-            {'params': panet_params, 'lr': learning_rate * 0.5},   # 5x lower for PANet
-            {'params': head_params, 'lr': learning_rate}            # Full LR for detection heads
-        ], lr=learning_rate, weight_decay=weight_decay)
+        # Build parameter groups, filtering out empty groups
+        param_groups = []
+        if backbone_params:
+            param_groups.append({'params': backbone_params, 'lr': learning_rate * 0.1})
+        if panet_params:
+            param_groups.append({'params': panet_params, 'lr': learning_rate * 0.5})
+        if head_params:
+            param_groups.append({'params': head_params, 'lr': learning_rate})
         
-        logger.info(f"YOLOv5 differential LR: backbone={learning_rate*0.1:.6f}, "
-                    f"PANet={learning_rate*0.5:.6f}, heads={learning_rate:.6f}")
-        console.print(f"[cyan]🎯 Differential Learning Rates:[/cyan] "
-                      f"Backbone={learning_rate*0.1:.6f}, PANet={learning_rate*0.5:.6f}, Heads={learning_rate:.6f}")
+        # Fallback: if all groups are empty (shouldn't happen), use all parameters
+        if not param_groups:
+            logger.warning("No parameters found in YOLOv5 groups, using single LR for all parameters")
+            optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        else:
+            # Create optimizer with differential learning rates
+            optimizer = optim.AdamW(param_groups, lr=learning_rate, weight_decay=weight_decay)
+            
+            logger.info(f"YOLOv5 differential LR: backbone={learning_rate*0.1:.6f} ({len(backbone_params)} params), "
+                        f"PANet={learning_rate*0.5:.6f} ({len(panet_params)} params), "
+                        f"heads={learning_rate:.6f} ({len(head_params)} params)")
+            console.print(f"[cyan]🎯 Differential Learning Rates:[/cyan] "
+                          f"Backbone={learning_rate*0.1:.6f}, PANet={learning_rate*0.5:.6f}, Heads={learning_rate:.6f}")
     else:
         # For other models, use single learning rate
         optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -374,15 +406,23 @@ def save_model(model, best_model_state, optimizer, scheduler, train_losses, val_
     torch.save(save_dict, model_save_path)
     
     best_model_path = None
-    if best_model_state and any(not torch.equal(best_model_state[k], model.state_dict()[k]) for k in best_model_state.keys()):
-        best_model_path = os.path.join(model_save_dir, f'best_model_iou{best_val_iou:.3f}_epoch{best_epoch+1}_{timestamp}.pth')
-        torch.save({
-            'model_state_dict': best_model_state,
-            'best_val_iou': best_val_iou,
-            'best_epoch': best_epoch
-        }, best_model_path)
-        console.print(f"[green]✅ Best model saved to:[/green] {best_model_path}")
-        logger.info(f"Best model saved to: {best_model_path}")
+    # Only save best model if we have a valid best_model_state and it's different from current
+    if best_model_state is not None:
+        try:
+            # Check if best model state differs from current (avoid saving if same)
+            is_different = any(not torch.equal(best_model_state[k], model.state_dict()[k]) 
+                             for k in best_model_state.keys() if k in model.state_dict())
+            if is_different:
+                best_model_path = os.path.join(model_save_dir, f'best_model_iou{best_val_iou:.3f}_epoch{best_epoch+1}_{timestamp}.pth')
+                torch.save({
+                    'model_state_dict': best_model_state,
+                    'best_val_iou': best_val_iou,
+                    'best_epoch': best_epoch
+                }, best_model_path)
+                console.print(f"[green]✅ Best model saved to:[/green] {best_model_path}")
+                logger.info(f"Best model saved to: {best_model_path}")
+        except Exception as e:
+            logger.warning(f"Could not save best model: {e}")
     
     console.print(f"[green]✅ Model saved to:[/green] {model_save_path}")
     logger.info(f"Model saved to: {model_save_path}")
@@ -402,11 +442,26 @@ def generate_training_plots(train_losses, val_losses, num_epochs, results_dir, t
         border_style="blue"
     ))
     
+    # Use actual number of completed epochs (handles early stopping)
+    # Handle edge case: empty loss arrays
+    if not train_losses or not val_losses:
+        logger.warning("No training data to plot, skipping plot generation")
+        return None
+    
+    actual_epochs = len(train_losses)
+    epochs_range = range(1, actual_epochs + 1)
+    
+    # Ensure val_losses matches train_losses length
+    if len(val_losses) != actual_epochs:
+        logger.warning(f"Length mismatch: train_losses={actual_epochs}, val_losses={len(val_losses)}")
+        # Truncate or pad to match
+        val_losses = val_losses[:actual_epochs] if len(val_losses) > actual_epochs else val_losses + [val_losses[-1]] * (actual_epochs - len(val_losses))
+    
     plt.figure(figsize=(15, 6))
     
     plt.subplot(1, 3, 1)
-    plt.plot(range(1, num_epochs + 1), train_losses, 'b-o', label='Training Loss', linewidth=2, markersize=6)
-    plt.plot(range(1, num_epochs + 1), val_losses, 'r-o', label='Validation Loss', linewidth=2, markersize=6)
+    plt.plot(epochs_range, train_losses, 'b-o', label='Training Loss', linewidth=2, markersize=6)
+    plt.plot(epochs_range, val_losses, 'r-o', label='Validation Loss', linewidth=2, markersize=6)
     plt.xlabel('Epoch', fontsize=12)
     plt.ylabel('Loss', fontsize=12)
     plt.title('Training and Validation Loss', fontsize=14, fontweight='bold')
@@ -434,11 +489,10 @@ def generate_training_plots(train_losses, val_losses, num_epochs, results_dir, t
                 f'{value:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=10)
     
     plt.subplot(1, 3, 3)
-    epochs = range(1, num_epochs + 1)
-    plt.plot(epochs, train_losses, 'b-', label='Training', linewidth=2)
-    plt.plot(epochs, val_losses, 'r-', label='Validation', linewidth=2)
-    plt.fill_between(epochs, train_losses, alpha=0.3, color='blue')
-    plt.fill_between(epochs, val_losses, alpha=0.3, color='red')
+    plt.plot(epochs_range, train_losses, 'b-', label='Training', linewidth=2)
+    plt.plot(epochs_range, val_losses, 'r-', label='Validation', linewidth=2)
+    plt.fill_between(epochs_range, train_losses, alpha=0.3, color='blue')
+    plt.fill_between(epochs_range, val_losses, alpha=0.3, color='red')
     plt.xlabel('Epoch', fontsize=12)
     plt.ylabel('Loss', fontsize=12)
     plt.title('Loss Progress', fontsize=14, fontweight='bold')
@@ -463,13 +517,21 @@ def display_final_summary(train_losses, val_losses, total_time, total_params, nu
                         best_val_iou, best_epoch, model_save_path, training_plots_path, 
                         log_file, results_dir, wandb_api_key):
     """Display final summary and log to W&B"""
+    # Handle empty loss arrays (edge case: training failed immediately)
+    final_train_loss = train_losses[-1] if train_losses else 0.0
+    final_val_loss = val_losses[-1] if val_losses else 0.0
+    best_train_loss = min(train_losses) if train_losses else 0.0
+    best_val_loss = min(val_losses) if val_losses else 0.0
+    best_train_epoch = train_losses.index(best_train_loss) + 1 if train_losses else 0
+    best_val_epoch = val_losses.index(best_val_loss) + 1 if val_losses else 0
+    
     console.print(Panel.fit(
         f"[bold green]TRAINING COMPLETE![/bold green]\n"
         f"[green]Total Time:[/green] {total_time/60:.1f} minutes\n"
-        f"[green]Final Training Loss:[/green] {train_losses[-1]:.4f}\n"
-        f"[green]Final Validation Loss:[/green] {val_losses[-1]:.4f}\n"
-        f"[green]Best Training Loss:[/green] {min(train_losses):.4f} (Epoch {train_losses.index(min(train_losses))+1})\n"
-        f"[green]Best Validation Loss:[/green] {min(val_losses):.4f} (Epoch {val_losses.index(min(val_losses))+1})",
+        f"[green]Final Training Loss:[/green] {final_train_loss:.4f}\n"
+        f"[green]Final Validation Loss:[/green] {final_val_loss:.4f}\n"
+        f"[green]Best Training Loss:[/green] {best_train_loss:.4f} (Epoch {best_train_epoch})\n"
+        f"[green]Best Validation Loss:[/green] {best_val_loss:.4f} (Epoch {best_val_epoch})",
         title="🎉 Training Complete",
         border_style="green"
     ))
@@ -478,31 +540,35 @@ def display_final_summary(train_losses, val_losses, total_time, total_params, nu
     results_table.add_column("Metric", style="cyan")
     results_table.add_column("Value", style="green")
     
+    # Use actual number of completed epochs (handles early stopping)
+    actual_epochs_completed = len(train_losses)
+    
     results_table.add_row("Total Training Time", f"{total_time/60:.1f} minutes")
-    results_table.add_row("Final Training Loss", f"{train_losses[-1]:.4f}")
-    results_table.add_row("Final Validation Loss", f"{val_losses[-1]:.4f}")
-    results_table.add_row("Best Training Loss", f"{min(train_losses):.4f}")
-    results_table.add_row("Best Validation Loss", f"{min(val_losses):.4f}")
+    results_table.add_row("Final Training Loss", f"{final_train_loss:.4f}")
+    results_table.add_row("Final Validation Loss", f"{final_val_loss:.4f}")
+    results_table.add_row("Best Training Loss", f"{best_train_loss:.4f}")
+    results_table.add_row("Best Validation Loss", f"{best_val_loss:.4f}")
     results_table.add_row("Model Parameters", f"{total_params:,}")
-    results_table.add_row("Epochs Completed", str(num_epochs))
+    results_table.add_row("Epochs Completed", f"{actual_epochs_completed} (of {num_epochs} planned)")
     
     console.print(results_table)
     
     logger.info("Training completed successfully")
     logger.info(f"Total training time: {total_time/60:.1f} minutes")
-    logger.info(f"Final training loss: {train_losses[-1]:.4f}")
-    logger.info(f"Final validation loss: {val_losses[-1]:.4f}")
+    logger.info(f"Final training loss: {final_train_loss:.4f}")
+    logger.info(f"Final validation loss: {final_val_loss:.4f}")
     
     if wandb_api_key:
         wandb.log({
-            "final_train_loss": train_losses[-1],
-            "final_val_loss": val_losses[-1],
-            "best_train_loss": min(train_losses),
-            "best_val_loss": min(val_losses),
+            "final_train_loss": final_train_loss,
+            "final_val_loss": final_val_loss,
+            "best_train_loss": best_train_loss,
+            "best_val_loss": best_val_loss,
             "best_val_iou_final": best_val_iou,
             "best_epoch_final": best_epoch,
             "total_training_time": total_time,
-            "total_epochs": num_epochs
+            "total_epochs": num_epochs,
+            "actual_epochs_completed": actual_epochs_completed
         })
         wandb.finish()
         logger.info("W&B run finished")
@@ -525,8 +591,8 @@ def display_final_summary(train_losses, val_losses, total_time, total_params, nu
         'plots_path': training_plots_path,
         'log_file': str(log_file),
         'total_time': total_time,
-        'final_train_loss': train_losses[-1],
-        'final_val_loss': val_losses[-1]
+        'final_train_loss': final_train_loss,
+        'final_val_loss': final_val_loss
     }
 
 
@@ -562,8 +628,8 @@ def main():
     
     device, model, optimizer, scheduler, learning_rate, total_params = setup_device_and_model(wandb_api_key)
     
-    # Get model name and variant for saving
-    model_name = os.getenv("MODEL_NAME", "EfficientDet")
+    # Get model name and variant for saving (normalize case for consistency)
+    model_name = os.getenv("MODEL_NAME", "EfficientDet").strip()
     model_variant = os.getenv("MODEL_VARIANT", None)
     
     # Training loop
@@ -575,39 +641,59 @@ def main():
     best_model_state = None
     
     # Configure learning rate scheduler for YOLOv5
-    if model_name == "YOLOv5":
+    if model_name.lower() == "yolov5":
         warmup_epochs = max(1, int(num_epochs * 0.1))  # 10% of epochs, minimum 1
-        cosine_epochs = num_epochs - warmup_epochs
+        cosine_epochs = max(1, num_epochs - warmup_epochs)  # Ensure at least 1 epoch for cosine
         
-        # Warmup scheduler: linear increase from 0.1x to 1.0x LR
-        warmup_scheduler = LinearLR(
-            optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=warmup_epochs
-        )
-        
-        # Cosine annealing scheduler: smooth decay after warmup
-        cosine_scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=cosine_epochs,
-            eta_min=1e-5  # Minimum learning rate
-        )
-        
-        # Sequential scheduler: warmup then cosine
-        scheduler = SequentialLR(
-            optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[warmup_epochs]
-        )
-        
-        logger.info(f"YOLOv5 LR scheduler: {warmup_epochs} epochs warmup, {cosine_epochs} epochs cosine annealing")
-        console.print(f"[cyan]📈 Learning Rate Schedule:[/cyan] {warmup_epochs} warmup → {cosine_epochs} cosine (min LR: 1e-5)")
+        # Validate scheduler configuration
+        if num_epochs < 2:
+            logger.warning(f"Too few epochs ({num_epochs}) for LR scheduling, using fixed LR")
+            scheduler = None
+        else:
+            # Warmup scheduler: linear increase from 0.1x to 1.0x LR
+            warmup_scheduler = LinearLR(
+                optimizer,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=warmup_epochs
+            )
+            
+            # Cosine annealing scheduler: smooth decay after warmup
+            cosine_scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=cosine_epochs,
+                eta_min=1e-5  # Minimum learning rate
+            )
+            
+            # Sequential scheduler: warmup then cosine
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_epochs]
+            )
+            
+            logger.info(f"YOLOv5 LR scheduler: {warmup_epochs} epochs warmup, {cosine_epochs} epochs cosine annealing")
+            console.print(f"[cyan]📈 Learning Rate Schedule:[/cyan] {warmup_epochs} warmup → {cosine_epochs} cosine (min LR: 1e-5)")
     
-    # Early stopping configuration
-    early_stopping_patience = int(os.getenv("EARLY_STOPPING_PATIENCE", "10"))
-    early_stopping_min_delta = float(os.getenv("EARLY_STOPPING_MIN_DELTA", "0.001"))
+    # Early stopping configuration with error handling
+    try:
+        early_stopping_patience = int(os.getenv("EARLY_STOPPING_PATIENCE", "10"))
+        if early_stopping_patience < 1:
+            raise ValueError("Patience must be at least 1")
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Invalid EARLY_STOPPING_PATIENCE, using default 10: {e}")
+        early_stopping_patience = 10
+    
+    try:
+        early_stopping_min_delta = float(os.getenv("EARLY_STOPPING_MIN_DELTA", "0.001"))
+        if early_stopping_min_delta < 0:
+            raise ValueError("Min delta must be non-negative")
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Invalid EARLY_STOPPING_MIN_DELTA, using default 0.001: {e}")
+        early_stopping_min_delta = 0.001
+    
     early_stopping_counter = 0
+    first_epoch_completed = False  # Track if we've completed at least one epoch
     
     console.print(Panel.fit(
         f"[bold green]STARTING TRAINING[/bold green]\n"
@@ -669,23 +755,38 @@ def main():
         
         # Step learning rate scheduler (for YOLOv5)
         if scheduler is not None:
-            scheduler.step()
-            current_lr = optimizer.param_groups[0]['lr']
-            logger.info(f"Learning rate after epoch {epoch+1}: {current_lr:.6f}")
-            
-            if wandb_api_key:
-                wandb.log({"learning_rate": current_lr, "epoch": epoch})
+            try:
+                scheduler.step()
+                # Safely get learning rate from first param group
+                if optimizer.param_groups:
+                    current_lr = optimizer.param_groups[0]['lr']
+                    logger.info(f"Learning rate after epoch {epoch+1}: {current_lr:.6f}")
+                    
+                    if wandb_api_key:
+                        wandb.log({"learning_rate": current_lr, "epoch": epoch})
+                else:
+                    logger.warning("Optimizer has no parameter groups, cannot log learning rate")
+            except Exception as e:
+                logger.warning(f"Error stepping scheduler: {e}")
         
         # Early stopping based on validation IoU improvement
-        if best_val_iou > previous_best_iou + early_stopping_min_delta:
-            # Improvement detected
-            early_stopping_counter = 0
+        # Only check after first epoch to avoid false triggers
+        if first_epoch_completed:
+            if best_val_iou > previous_best_iou + early_stopping_min_delta:
+                # Improvement detected
+                early_stopping_counter = 0
+            else:
+                # No improvement, increment counter
+                early_stopping_counter += 1
+                if early_stopping_counter >= early_stopping_patience:
+                    logger.info(f"Early stopping triggered: No IoU improvement for {early_stopping_patience} epochs")
+                    console.print(f"[yellow]⏹️  Early stopping:[/yellow] No improvement for {early_stopping_patience} epochs")
+                    break
         else:
-            early_stopping_counter += 1
-            if early_stopping_counter >= early_stopping_patience:
-                logger.info(f"Early stopping triggered: No IoU improvement for {early_stopping_patience} epochs")
-                console.print(f"[yellow]⏹️  Early stopping:[/yellow] No improvement for {early_stopping_patience} epochs")
-                break
+            # First epoch completed, mark flag for next epoch
+            first_epoch_completed = True
+            # Reset counter on first epoch (don't count it)
+            early_stopping_counter = 0
     
     # Post-training phase
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
