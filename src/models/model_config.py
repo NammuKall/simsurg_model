@@ -84,30 +84,30 @@ MODEL_CONFIGS: Dict[str, ModelConfig] = {
             "num_classes": 2,
             "pretrained": True,
             "model_size": "s",
-            "input_size": 640,
+            "input_size": (720, 1280),
         },
         description="YOLOv5 model with CSPDarkNet backbone and PANet (fastest training, good accuracy)",
         supports_pretrained=True,
         variants={
             "YOLOv5-Nano": {
                 "model_size": "n",
-                "input_size": 640,
+                "input_size": (720, 1280),
             },
             "YOLOv5-Small": {
                 "model_size": "s",
-                "input_size": 640,
+                "input_size": (720, 1280),
             },
             "YOLOv5-Medium": {
                 "model_size": "m",
-                "input_size": 640,
+                "input_size": (720, 1280),
             },
             "YOLOv5-Large": {
                 "model_size": "l",
-                "input_size": 640,
+                "input_size": (720, 1280),
             },
             "YOLOv5-XLarge": {
                 "model_size": "x",
-                "input_size": 640,
+                "input_size": (720, 1280),
             },
         }
     ),

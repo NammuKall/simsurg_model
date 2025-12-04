@@ -39,7 +39,7 @@ class YOLOv5Model(nn.Module):
     custom implementation (set pretrained=False or ensure ultralytics unavailable).
     """
     
-    def __init__(self, num_classes=2, pretrained=True, model_size='s', input_size=640, 
+    def __init__(self, num_classes=2, pretrained=True, model_size='s', input_size=(720, 1280), 
                  loss_weights=None):
         """
         Initialize YOLOv5 model
@@ -54,7 +54,9 @@ class YOLOv5Model(nn.Module):
                        - 'm': medium
                        - 'l': large
                        - 'x': xlarge (slowest, most accurate)
-            input_size: Input image size (default: 640, YOLOv5 standard)
+            input_size: Input image size as (height, width) tuple or single int for square
+                        Default: (720, 1280) for SimSurgSkill dataset
+                        If single int provided, creates square (int, int)
                         Used for validation - images should be resized to this size
             loss_weights: Dict with loss weights {'coord': float, 'conf': float, 'class': float}
                          Default: {'coord': 0.05, 'conf': 1.0, 'class': 0.5} (YOLOv5 standard)
@@ -62,7 +64,15 @@ class YOLOv5Model(nn.Module):
         super(YOLOv5Model, self).__init__()
         
         self.num_classes = num_classes
-        self.input_size = input_size
+        # Normalize input_size to tuple (height, width)
+        if isinstance(input_size, (int, float)):
+            # Single value -> square input
+            self.input_size = (int(input_size), int(input_size))
+        elif isinstance(input_size, (tuple, list)) and len(input_size) == 2:
+            # Tuple/list -> (height, width)
+            self.input_size = (int(input_size[0]), int(input_size[1]))
+        else:
+            raise ValueError(f"input_size must be int or (height, width) tuple, got {input_size}")
         self.model_size = model_size
         
         # Set loss weights (YOLOv5 standard defaults)
@@ -273,15 +283,23 @@ class YOLOv5Model(nn.Module):
             
             # Validate input_size parameter if set (warn if significant mismatch)
             # Note: input_size is a reference size, model can handle different sizes
-            if self.input_size > 0:
-                expected_size = self.input_size
-                actual_size = max(input_img_size)
-                # Only warn if difference is significant (>50% different)
-                if abs(actual_size - expected_size) > max(expected_size * 0.5, 100):
+            if self.input_size[0] > 0 and self.input_size[1] > 0:
+                expected_h, expected_w = self.input_size
+                actual_h, actual_w = input_img_size
+                # Check if aspect ratio matches (allow some tolerance)
+                expected_aspect = expected_w / expected_h
+                actual_aspect = actual_w / actual_h
+                aspect_diff = abs(expected_aspect - actual_aspect)
+                
+                # Warn if aspect ratio differs significantly (>20%) or size differs significantly
+                size_diff_h = abs(actual_h - expected_h) / max(expected_h, 1)
+                size_diff_w = abs(actual_w - expected_w) / max(expected_w, 1)
+                
+                if aspect_diff > 0.2 or size_diff_h > 0.5 or size_diff_w > 0.5:
                     import warnings
                     warnings.warn(
-                        f"Input size differs significantly: model reference size is {expected_size}px, "
-                        f"got {actual_size}px. Model will adapt, but performance may vary.",
+                        f"Input size differs significantly: model reference size is {expected_h}x{expected_w}, "
+                        f"got {actual_h}x{actual_w}. Model will adapt, but performance may vary.",
                         UserWarning
                     )
             

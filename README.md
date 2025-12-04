@@ -96,7 +96,7 @@ MODEL_SAVE_DIR=models
   - Differential learning rates (lower for backbone, higher for detection heads)
   - Cosine annealing scheduler with warmup
   - Optimized loss weights
-- **Default Parameters**: `num_classes=2`, `pretrained=True`, `model_size="s"`, `input_size=640`
+- **Default Parameters**: `num_classes=2`, `pretrained=True`, `model_size="s"`, `input_size=(720, 1280)`
 
 #### ResNet
 - **Description**: ResNet model for classification
